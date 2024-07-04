@@ -1206,6 +1206,32 @@ error:
     return NULL;
 }
 
+int testCodecov1() {
+    int a, b, c;
+    a = 136337838;
+    b = a * 2;
+    c = a + b;
+    return c;
+}
+
+
+int testCodecov2() {
+    int a, b, c;
+    a = 1363378323;
+    b = a * 2;
+    c = a + b + b;
+    return c;
+}
+
+int testCodecov3() {
+    int a, b, c;
+    a = 1363378;
+    b = a * 2;
+    c = a + b + b + a;
+    return c;
+}
+
+
 #ifdef REDIS_TEST
 #include <stdio.h>
 #include <limits.h>
