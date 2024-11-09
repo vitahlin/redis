@@ -7,6 +7,7 @@
  */
 
 #include "server.h"
+#include "util.h"
 
 /*-----------------------------------------------------------------------------
  * List API
@@ -383,12 +384,12 @@ int listTypeReplaceAtIndex(robj *o, int index, robj *value) {
 }
 
 /* Compare the given object with the entry at the current position. */
-int listTypeEqual(listTypeEntry *entry, robj *o) {
+int listTypeEqual(listTypeEntry *entry, robj *o, size_t object_len) {
     serverAssertWithInfo(NULL,o,sdsEncodedObject(o));
     if (entry->li->encoding == OBJ_ENCODING_QUICKLIST) {
-        return quicklistCompare(&entry->entry,o->ptr,sdslen(o->ptr));
+        return quicklistCompare(&entry->entry,o->ptr,object_len);
     } else if (entry->li->encoding == OBJ_ENCODING_LISTPACK) {
-        return lpCompare(entry->lpe,o->ptr,sdslen(o->ptr));
+        return lpCompare(entry->lpe,o->ptr,object_len);
     } else {
         serverPanic("Unknown list encoding");
     }
@@ -462,6 +463,7 @@ void listTypeDelRange(robj *subject, long start, long count) {
 /* Implements LPUSH/RPUSH/LPUSHX/RPUSHX. 
  * 'xx': push if key exists. */
 void pushGenericCommand(client *c, int where, int xx) {
+    unsigned long llen;
     int j;
 
     robj *lobj = lookupKeyWrite(c->db, c->argv[1]);
@@ -482,11 +484,13 @@ void pushGenericCommand(client *c, int where, int xx) {
         server.dirty++;
     }
 
-    addReplyLongLong(c, listTypeLength(lobj));
+    llen = listTypeLength(lobj);
+    addReplyLongLong(c, llen);
 
     char *event = (where == LIST_HEAD) ? "lpush" : "rpush";
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_LIST,event,c->argv[1],c->db->id);
+    updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_LIST, llen - (c->argc - 2), llen);
 }
 
 /* LPUSH <key> <element> [<element> ...] */
@@ -538,8 +542,9 @@ void linsertCommand(client *c) {
 
     /* Seek pivot from head to tail */
     iter = listTypeInitIterator(subject,0,LIST_TAIL);
+    const size_t object_len = sdslen(c->argv[3]->ptr);
     while (listTypeNext(iter,&entry)) {
-        if (listTypeEqual(&entry,c->argv[3])) {
+        if (listTypeEqual(&entry,c->argv[3],object_len)) {
             listTypeInsert(&entry,c->argv[4],where);
             inserted = 1;
             break;
@@ -552,6 +557,8 @@ void linsertCommand(client *c) {
         notifyKeyspaceEvent(NOTIFY_LIST,"linsert",
                             c->argv[1],c->db->id);
         server.dirty++;
+        unsigned long ll = listTypeLength(subject);
+        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_LIST, ll-1, ll);
     } else {
         /* Notify client of a failed insert */
         addReplyLongLong(c,-1);
@@ -735,9 +742,11 @@ void addListRangeReply(client *c, robj *o, long start, long end, int reverse) {
  * if the key got deleted by this function. */
 void listElementsRemoved(client *c, robj *key, int where, robj *o, long count, int signal, int *deleted) {
     char *event = (where == LIST_HEAD) ? "lpop" : "rpop";
-
+    unsigned long llen = listTypeLength(o);
+    
     notifyKeyspaceEvent(NOTIFY_LIST, event, key, c->db->id);
-    if (listTypeLength(o) == 0) {
+    updateKeysizesHist(c->db, getKeySlot(key->ptr), OBJ_LIST, llen + count, llen);
+    if (llen == 0) {
         if (deleted) *deleted = 1;
 
         dbDelete(c->db, key);
@@ -869,7 +878,7 @@ void lrangeCommand(client *c) {
 /* LTRIM <key> <start> <stop> */
 void ltrimCommand(client *c) {
     robj *o;
-    long start, end, llen, ltrim, rtrim;
+    long start, end, llen, ltrim, rtrim, llenNew;;
 
     if ((getLongFromObjectOrReply(c, c->argv[2], &start, NULL) != C_OK) ||
         (getLongFromObjectOrReply(c, c->argv[3], &end, NULL) != C_OK)) return;
@@ -907,12 +916,13 @@ void ltrimCommand(client *c) {
     }
 
     notifyKeyspaceEvent(NOTIFY_LIST,"ltrim",c->argv[1],c->db->id);
-    if (listTypeLength(o) == 0) {
+    if ((llenNew = listTypeLength(o)) == 0) {
         dbDelete(c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
     } else {
         listTypeTryConversion(o,LIST_CONV_SHRINKING,NULL,NULL);
     }
+    updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_LIST, llen, llenNew);
     signalModifiedKey(c,c->db,c->argv[1]);
     server.dirty += (ltrim + rtrim);
     addReply(c,shared.ok);
@@ -999,8 +1009,9 @@ void lposCommand(client *c) {
     listTypeEntry entry;
     long llen = listTypeLength(o);
     long index = 0, matches = 0, matchindex = -1, arraylen = 0;
+    const size_t ele_len = sdslen(ele->ptr);
     while (listTypeNext(li,&entry) && (maxlen == 0 || index < maxlen)) {
-        if (listTypeEqual(&entry,ele)) {
+        if (listTypeEqual(&entry,ele,ele_len)) {
             matches++;
             matchindex = (direction == LIST_TAIL) ? index : llen - index - 1;
             if (matches >= rank) {
@@ -1052,8 +1063,9 @@ void lremCommand(client *c) {
     }
 
     listTypeEntry entry;
+    const size_t object_len = sdslen(c->argv[3]->ptr);
     while (listTypeNext(li,&entry)) {
-        if (listTypeEqual(&entry,obj)) {
+        if (listTypeEqual(&entry,obj,object_len)) {
             listTypeDelete(li, &entry);
             server.dirty++;
             removed++;
@@ -1063,8 +1075,11 @@ void lremCommand(client *c) {
     listTypeReleaseIterator(li);
 
     if (removed) {
+        long ll = listTypeLength(subject);
+        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_LIST, ll + removed, ll);
         notifyKeyspaceEvent(NOTIFY_LIST,"lrem",c->argv[1],c->db->id);
-        if (listTypeLength(subject) == 0) {
+        
+        if (ll == 0) {
             dbDelete(c->db,c->argv[1]);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
         } else {
@@ -1086,6 +1101,10 @@ void lmoveHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value,
     listTypeTryConversionAppend(dstobj,&value,0,0,NULL,NULL);
     listTypePush(dstobj,value,where);
     signalModifiedKey(c,c->db,dstkey);
+
+    long ll = listTypeLength(dstobj);
+    updateKeysizesHist(c->db, getKeySlot(dstkey->ptr), OBJ_LIST, ll - 1, ll);
+
     notifyKeyspaceEvent(NOTIFY_LIST,
                         where == LIST_HEAD ? "lpush" : "rpush",
                         dstkey,

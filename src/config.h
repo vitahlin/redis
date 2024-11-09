@@ -32,6 +32,14 @@
 #define redis_stat stat
 #endif
 
+#ifndef CACHE_LINE_SIZE
+#if defined(__aarch64__) && defined(__APPLE__)
+#define CACHE_LINE_SIZE 128
+#else
+#define CACHE_LINE_SIZE 64
+#endif
+#endif
+
 /* Test for proc filesystem */
 #ifdef __linux__
 #define HAVE_PROC_STAT 1
@@ -297,6 +305,30 @@ void setcpuaffinity(const char *cpulist);
 /* Test for posix_fadvise() */
 #if defined(__linux__) || __FreeBSD__ >= 10
 #define HAVE_FADVISE
+#endif
+
+#if defined(__x86_64__) && ((defined(__GNUC__) && __GNUC__ > 5) || (defined(__clang__)))
+    #if defined(__has_attribute) && __has_attribute(target)
+        #define HAVE_POPCNT
+        #define ATTRIBUTE_TARGET_POPCNT __attribute__((target("popcnt")))
+    #else
+        #define ATTRIBUTE_TARGET_POPCNT
+    #endif
+#else
+    #define ATTRIBUTE_TARGET_POPCNT
+#endif
+
+/* Check if we can compile AVX2 code */
+#if defined (__x86_64__) && ((defined(__GNUC__) && __GNUC__ >= 5) || (defined(__clang__) && __clang_major__ >= 4))
+#if defined(__has_attribute) && __has_attribute(target)
+#define HAVE_AVX2
+#endif
+#endif
+
+#if defined (HAVE_AVX2)
+#define ATTRIBUTE_TARGET_AVX2 __attribute__((target("avx2")))
+#else
+#define ATTRIBUTE_TARGET_AVX2
 #endif
 
 #endif

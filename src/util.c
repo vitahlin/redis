@@ -30,6 +30,7 @@
 
 #include "fmacros.h"
 #include "fpconv_dtoa.h"
+#include "fast_float_strtod.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,10 +54,20 @@
 
 #define UNUSED(x) ((void)(x))
 
+/* Selectively define static_assert. Attempt to avoid include server.h in this file. */
+#ifndef static_assert
+#define static_assert(expr, lit) extern char __static_assert_failure[(expr) ? 1:-1]
+#endif
+
+static_assert(UINTPTR_MAX == 0xffffffffffffffff || UINTPTR_MAX == 0xffffffff, "Unsupported pointer size");
+
 /* Glob-style pattern matching. */
 static int stringmatchlen_impl(const char *pattern, int patternLen,
-        const char *string, int stringLen, int nocase, int *skipLongerMatches)
+        const char *string, int stringLen, int nocase, int *skipLongerMatches, int nesting)
 {
+    /* Protection against abusive patterns. */
+    if (nesting > 1000) return 0;
+
     while(patternLen && stringLen) {
         switch(pattern[0]) {
         case '*':
@@ -68,7 +79,7 @@ static int stringmatchlen_impl(const char *pattern, int patternLen,
                 return 1; /* match */
             while(stringLen) {
                 if (stringmatchlen_impl(pattern+1, patternLen-1,
-                            string, stringLen, nocase, skipLongerMatches))
+                            string, stringLen, nocase, skipLongerMatches, nesting+1))
                     return 1; /* match */
                 if (*skipLongerMatches)
                     return 0; /* no match */
@@ -190,7 +201,7 @@ static int stringmatchlen_impl(const char *pattern, int patternLen,
 int stringmatchlen(const char *pattern, int patternLen,
         const char *string, int stringLen, int nocase) {
     int skipLongerMatches = 0;
-    return stringmatchlen_impl(pattern,patternLen,string,stringLen,nocase,&skipLongerMatches);
+    return stringmatchlen_impl(pattern,patternLen,string,stringLen,nocase,&skipLongerMatches,0);
 }
 
 int stringmatch(const char *pattern, const char *string, int nocase) {
@@ -612,7 +623,7 @@ int string2ld(const char *s, size_t slen, long double *dp) {
 int string2d(const char *s, size_t slen, double *dp) {
     errno = 0;
     char *eptr;
-    *dp = strtod(s, &eptr);
+    *dp = fast_float_strtod(s, &eptr);
     if (slen == 0 ||
         isspace(((const char*)s)[0]) ||
         (size_t)(eptr-(char*)s) != slen ||

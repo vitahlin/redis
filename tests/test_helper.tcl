@@ -30,7 +30,7 @@ set test_dirs {
 foreach test_dir $test_dirs {
     set files [glob -nocomplain $dir/tests/$test_dir/*.tcl]
 
-    foreach file $files {
+    foreach file [lsort $files] {
         lappend ::all_tests $test_dir/[file root [file tail $file]]
     }
 }
@@ -506,7 +506,7 @@ proc the_end {} {
     }
 }
 
-# The client is not even driven (the test server is instead) as we just need
+# The client is not event driven (the test server is instead) as we just need
 # to read the command, execute, reply... all this in a loop.
 proc test_client_main server_port {
     set ::test_server_fd [socket localhost $server_port]

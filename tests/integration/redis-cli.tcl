@@ -6,6 +6,9 @@ if {$::singledb} {
     set ::dbnum 9
 }
 
+file delete ./.rediscli_history_test
+set ::env(REDISCLI_HISTFILE) ".rediscli_history_test"
+
 start_server {tags {"cli"}} {
     proc open_cli {{opts ""} {infile ""}} {
         if { $opts == "" } {
@@ -68,8 +71,6 @@ start_server {tags {"cli"}} {
         set _ [format_output [read_cli $fd]]
     }
 
-    # Note: prompt may be affected by the local history, if failed, please
-    # try using `rm ~/.rediscli_history` to delete it and then retry.
     proc test_interactive_cli_with_prompt {name code} {
         set ::env(FAKETTY_WITH_PROMPT) 1
         test_interactive_cli $name $code
@@ -808,4 +809,35 @@ if {!$::tls} { ;# fake_redis_node doesn't support TLS
         assert_equal 3 [exec {*}$cmdline ZCARD new_zset]
         assert_equal "a\n1\nb\n2\nc\n3" [exec {*}$cmdline ZRANGE new_zset 0 -1 WITHSCORES]
     }
+
+    test "Send eval command by using --eval option" {
+        set tmpfile [write_tmpfile {return ARGV[1]}]
+        set cmdline [rediscli [srv host] [srv port]]
+        assert_equal "foo" [exec {*}$cmdline --eval $tmpfile , foo]
+    }
 }
+
+start_server {tags {"cli external:skip"}} {
+    test_interactive_cli_with_prompt "db_num showed in redis-cli after reconnected" {
+        run_command $fd "select 0\x0D"
+        run_command $fd "set a zoo-0\x0D"
+        run_command $fd "select 6\x0D"
+        run_command $fd "set a zoo-6\x0D"
+        r save
+
+        # kill server and restart
+        exec kill [s process_id]
+        wait_for_log_messages 0 {"*Redis is now ready to exit*"} 0 1000 10
+        catch {[run_command $fd "ping\x0D"]} err
+        restart_server 0 true false 0
+
+        # redis-cli should show '[6]' after reconnected and return 'zoo-6'
+        write_cli $fd "GET a\x0D"
+        after 100
+        set result [format_output [read_cli $fd]]
+        set regex {not connected> GET a.*"zoo-6".*127\.0\.0\.1:[0-9]*\[6\]>}
+        assert_equal 1 [regexp $regex $result]
+    }
+}
+
+file delete ./.rediscli_history_test

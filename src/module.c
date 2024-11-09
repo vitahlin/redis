@@ -983,7 +983,7 @@ int moduleGetCommandChannelsViaAPI(struct redisCommand *cmd, robj **argv, int ar
  *
  * These functions are used to implement custom Redis commands.
  *
- * For examples, see https://redis.io/topics/modules-intro.
+ * For examples, see https://redis.io/docs/latest/develop/reference/modules/.
  * -------------------------------------------------------------------------- */
 
 /* Return non-zero if a module command, that was declared with the
@@ -1197,7 +1197,7 @@ RedisModuleCommand *moduleCreateCommandProxy(struct RedisModule *module, sds dec
  *                    from the same input arguments and key values.
  *                    Starting from Redis 7.0 this flag has been deprecated.
  *                    Declaring a command as "random" can be done using
- *                    command tips, see https://redis.io/topics/command-tips.
+ *                    command tips, see https://redis.io/docs/latest/develop/reference/command-tips/.
  * * **"allow-stale"**: The command is allowed to run on slaves that don't
  *                      serve stale data. Don't use if you don't know what
  *                      this means.
@@ -1587,7 +1587,7 @@ int RM_SetCommandACLCategories(RedisModuleCommand *command, const char *aclflags
  *     both strings set to NULL.
  *
  * - `tips`: A string of space-separated tips regarding this command, meant for
- *   clients and proxies. See https://redis.io/topics/command-tips.
+ *   clients and proxies. See https://redis.io/docs/latest/develop/reference/command-tips/.
  *
  * - `arity`: Number of arguments, including the command name itself. A positive
  *   number specifies an exact number of arguments and a negative number
@@ -2287,6 +2287,8 @@ void RM_SetModuleAttribs(RedisModuleCtx *ctx, const char *name, int ver, int api
     module->options = 0;
     module->info_cb = 0;
     module->defrag_cb = 0;
+    module->defrag_start_cb = 0;
+    module->defrag_end_cb = 0;
     module->loadmod = NULL;
     module->num_commands_with_acl_categories = 0;
     module->onload = 1;
@@ -4068,7 +4070,8 @@ static void moduleInitKeyTypeSpecific(RedisModuleKey *key) {
  * * REDISMODULE_OPEN_KEY_NONOTIFY - Don't trigger keyspace event on key misses.
  * * REDISMODULE_OPEN_KEY_NOSTATS - Don't update keyspace hits/misses counters.
  * * REDISMODULE_OPEN_KEY_NOEXPIRE - Avoid deleting lazy expired keys.
- * * REDISMODULE_OPEN_KEY_NOEFFECTS - Avoid any effects from fetching the key. */
+ * * REDISMODULE_OPEN_KEY_NOEFFECTS - Avoid any effects from fetching the key.
+ * * REDISMODULE_OPEN_KEY_ACCESS_EXPIRED - Access expired keys that have not yet been deleted */
 RedisModuleKey *RM_OpenKey(RedisModuleCtx *ctx, robj *keyname, int mode) {
     RedisModuleKey *kp;
     robj *value;
@@ -4078,6 +4081,7 @@ RedisModuleKey *RM_OpenKey(RedisModuleCtx *ctx, robj *keyname, int mode) {
     flags |= (mode & REDISMODULE_OPEN_KEY_NOSTATS? LOOKUP_NOSTATS: 0);
     flags |= (mode & REDISMODULE_OPEN_KEY_NOEXPIRE? LOOKUP_NOEXPIRE: 0);
     flags |= (mode & REDISMODULE_OPEN_KEY_NOEFFECTS? LOOKUP_NOEFFECTS: 0);
+    flags |= (mode & REDISMODULE_OPEN_KEY_ACCESS_EXPIRED ? (LOOKUP_ACCESS_EXPIRED) : 0);
 
     if (mode & REDISMODULE_WRITE) {
         value = lookupKeyWriteWithFlags(ctx->client->db,keyname, flags);
@@ -4167,15 +4171,7 @@ int RM_KeyType(RedisModuleKey *key) {
  * If the key pointer is NULL or the key is empty, zero is returned. */
 size_t RM_ValueLength(RedisModuleKey *key) {
     if (key == NULL || key->value == NULL) return 0;
-    switch(key->value->type) {
-    case OBJ_STRING: return stringObjectLen(key->value);
-    case OBJ_LIST: return listTypeLength(key->value);
-    case OBJ_SET: return setTypeSize(key->value);
-    case OBJ_ZSET: return zsetLength(key->value);
-    case OBJ_HASH: return hashTypeLength(key->value, 0);  /* OPEN: To subtract expired fields? */
-    case OBJ_STREAM: return streamLength(key->value);
-    default: return 0;
-    }
+    return getObjectLength(key->value);
 }
 
 /* If the key is open for writing, remove it, and setup the key to
@@ -4274,7 +4270,7 @@ int RM_SetAbsExpire(RedisModuleKey *key, mstime_t expire) {
 void RM_ResetDataset(int restart_aof, int async) {
     if (restart_aof && server.aof_state != AOF_OFF) stopAppendOnly();
     flushAllDataAndResetRDB((async? EMPTYDB_ASYNC: EMPTYDB_NO_FLAGS) | EMPTYDB_NOFUNCTIONS);
-    if (server.aof_enabled && restart_aof) restartAOFAfterSYNC();
+    if (server.aof_enabled && restart_aof) startAppendOnlyWithRetry();
 }
 
 /* Returns the number of keys in the current db. */
@@ -5376,6 +5372,9 @@ int RM_HashGet(RedisModuleKey *key, int flags, ...) {
     va_list ap;
     if (key->value && key->value->type != OBJ_HASH) return REDISMODULE_ERR;
 
+    if (key->mode & REDISMODULE_OPEN_KEY_ACCESS_EXPIRED)
+        hfeFlags = HFE_LAZY_ACCESS_EXPIRED; /* allow read also expired fields */
+
     va_start(ap, flags);
     while(1) {
         RedisModuleString *field, **valueptr;
@@ -5426,7 +5425,7 @@ int RM_HashGet(RedisModuleKey *key, int flags, ...) {
 /* --------------------------------------------------------------------------
  * ## Key API for Stream type
  *
- * For an introduction to streams, see https://redis.io/topics/streams-intro.
+ * For an introduction to streams, see https://redis.io/docs/latest/develop/data-types/streams/.
  *
  * The type RedisModuleStreamID, which is used in stream functions, is a struct
  * with two 64-bit fields and is defined as
@@ -6299,7 +6298,7 @@ fmterr:
  *        // Do something with myval.
  *      }
  *
- * This API is documented here: https://redis.io/topics/modules-intro
+ * This API is documented here: https://redis.io/docs/latest/develop/reference/modules/
  */
 RedisModuleCallReply *RM_Call(RedisModuleCtx *ctx, const char *cmdname, const char *fmt, ...) {
     client *c = NULL;
@@ -6809,7 +6808,7 @@ robj *moduleTypeDupOrReply(client *c, robj *fromkey, robj *tokey, int todb, robj
 
 /* Register a new data type exported by the module. The parameters are the
  * following. Please for in depth documentation check the modules API
- * documentation, especially https://redis.io/topics/modules-native-types.
+ * documentation, especially https://redis.io/docs/latest/develop/reference/modules/modules-native-types/.
  *
  * * **name**: A 9 characters data type name that MUST be unique in the Redis
  *   Modules ecosystem. Be creative... and there will be no collisions. Use
@@ -7698,7 +7697,7 @@ void RM_LatencyAddSample(const char *event, mstime_t latency) {
  * ## Blocking clients from modules
  *
  * For a guide about blocking commands in modules, see
- * https://redis.io/topics/modules-blocking-ops.
+ * https://redis.io/docs/latest/develop/reference/modules/modules-blocking-ops/.
  * -------------------------------------------------------------------------- */
 
 /* Returns 1 if the client already in the moduleUnblocked list, 0 otherwise. */
@@ -8710,7 +8709,7 @@ void moduleReleaseGIL(void) {
  * runs is dangerous and discouraged. In order to react to key space events with
  * write actions, please refer to `RM_AddPostNotificationJob`.
  *
- * See https://redis.io/topics/notifications for more information.
+ * See https://redis.io/docs/latest/develop/use/keyspace-notifications/ for more information.
  */
 int RM_SubscribeToKeyspaceEvents(RedisModuleCtx *ctx, int types, RedisModuleNotificationFunc callback) {
     RedisModuleKeyspaceSubscriber *sub = zmalloc(sizeof(*sub));
@@ -8842,9 +8841,9 @@ void moduleNotifyKeyspaceEvent(int type, const char *event, robj *key, int dbid)
              * it will not be notified about it. */
             int prev_active = sub->active;
             sub->active = 1;
-            server.lazy_expire_disabled++;
+            server.allow_access_expired++;
             sub->notify_callback(&ctx, type, event, key);
-            server.lazy_expire_disabled--;
+            server.allow_access_expired--;
             sub->active = prev_active;
             moduleFreeContext(&ctx);
         }
@@ -9671,6 +9670,12 @@ RedisModuleString *RM_GetModuleUserACLString(RedisModuleUser *user) {
  * The returned string must be released with RedisModule_FreeString() or by
  * enabling automatic memory management. */
 RedisModuleString *RM_GetCurrentUserName(RedisModuleCtx *ctx) {
+    /* Sometimes, the user isn't passed along the call stack or isn't
+     * even set, so we need to check for the members to avoid crashes. */
+    if (ctx->client == NULL || ctx->client->user == NULL || ctx->client->user->name == NULL) {
+        return NULL;
+    }
+
     return RM_CreateString(ctx,ctx->client->user->name,sdslen(ctx->client->user->name));
 }
 
@@ -11085,8 +11090,9 @@ static void moduleScanKeyCallback(void *privdata, const dictEntry *de) {
     } else if (o->type == OBJ_HASH) {
         sds val = dictGetVal(de);
 
-        /* If field is expired, then ignore */
-        if (hfieldIsExpired(key))
+        /* If field is expired and not indicated to access expired, then ignore */
+        if ((!(data->key->mode & REDISMODULE_OPEN_KEY_ACCESS_EXPIRED)) &&
+            (hfieldIsExpired(key)))
             return;
 
         field = createStringObject(key, hfieldlen(key));
@@ -11222,7 +11228,8 @@ int RM_ScanKey(RedisModuleKey *key, RedisModuleScanCursor *cursor, RedisModuleSc
                 p = lpNext(lp, p);
 
                 /* Skip expired fields */
-                if (hashTypeIsExpired(o, vllExpire))
+                if ((!(key->mode & REDISMODULE_OPEN_KEY_ACCESS_EXPIRED)) &&
+                    (hashTypeIsExpired(o, vllExpire)))
                     continue;
             }
 
@@ -11881,7 +11888,7 @@ void processModuleLoadingProgressEvent(int is_aof) {
 /* When a key is deleted (in dbAsyncDelete/dbSyncDelete/setKey), it
 *  will be called to tell the module which key is about to be released. */
 void moduleNotifyKeyUnlink(robj *key, robj *val, int dbid, int flags) {
-    server.lazy_expire_disabled++;
+    server.allow_access_expired++;
     int subevent = REDISMODULE_SUBEVENT_KEY_DELETED;
     if (flags & DB_FLAG_KEY_EXPIRED) {
         subevent = REDISMODULE_SUBEVENT_KEY_EXPIRED;
@@ -11904,7 +11911,7 @@ void moduleNotifyKeyUnlink(robj *key, robj *val, int dbid, int flags) {
             mt->unlink(key,mv->value);
         }
     }
-    server.lazy_expire_disabled--;
+    server.allow_access_expired--;
 }
 
 /* Return the free_effort of the module, it will automatically choose to call 
@@ -12463,10 +12470,15 @@ void modulePipeReadable(aeEventLoop *el, int fd, void *privdata, int mask) {
 /* Helper function for the MODULE and HELLO command: send the list of the
  * loaded modules to the client. */
 void addReplyLoadedModules(client *c) {
+    const long ln = dictSize(modules);
+    /* In case no module is load we avoid iterator creation */
+    addReplyArrayLen(c,ln);
+    if (ln == 0) {
+        return;
+    }
     dictIterator *di = dictGetIterator(modules);
     dictEntry *de;
 
-    addReplyArrayLen(c,dictSize(modules));
     while ((de = dictNext(di)) != NULL) {
         sds name = dictGetKey(de);
         struct RedisModule *module = dictGetVal(de);
@@ -13070,7 +13082,7 @@ int RM_RdbLoad(RedisModuleCtx *ctx, RedisModuleRdbStream *stream, int flags) {
     int ret = rdbLoad(stream->data.filename,NULL,RDBFLAGS_NONE);
 
     if (server.current_client) unprotectClient(server.current_client);
-    if (server.aof_state != AOF_OFF) startAppendOnly();
+    if (server.aof_enabled) startAppendOnlyWithRetry();
 
     if (ret != RDB_OK) {
         errno = (ret == RDB_NOT_EXIST) ? ENOENT : EIO;
@@ -13451,6 +13463,16 @@ int RM_RegisterDefragFunc(RedisModuleCtx *ctx, RedisModuleDefragFunc cb) {
     return REDISMODULE_OK;
 }
 
+/* Register a defrag callbacks that will be called when defrag operation starts and ends.
+ *
+ * The callbacks are the same as `RM_RegisterDefragFunc` but the user
+ * can also assume the callbacks are called when the defrag operation starts and ends. */
+int RM_RegisterDefragCallbacks(RedisModuleCtx *ctx, RedisModuleDefragFunc start, RedisModuleDefragFunc end) {
+    ctx->module->defrag_start_cb = start;
+    ctx->module->defrag_end_cb = end;
+    return REDISMODULE_OK;
+}
+
 /* When the data type defrag callback iterates complex structures, this
  * function should be called periodically. A zero (false) return
  * indicates the callback may continue its work. A non-zero value (true)
@@ -13527,6 +13549,30 @@ int RM_DefragCursorGet(RedisModuleDefragCtx *ctx, unsigned long *cursor) {
 void *RM_DefragAlloc(RedisModuleDefragCtx *ctx, void *ptr) {
     UNUSED(ctx);
     return activeDefragAlloc(ptr);
+}
+
+/* Allocate memory for defrag purposes
+ *
+ * On the common cases user simply want to reallocate a pointer with a single
+ * owner. For such usecase RM_DefragAlloc is enough. But on some usecases the user
+ * might want to replace a pointer with multiple owners in different keys.
+ * In such case, an in place replacement can not work because the other key still
+ * keep a pointer to the old value. 
+ * 
+ * RM_DefragAllocRaw and RM_DefragFreeRaw allows to control when the memory
+ * for defrag purposes will be allocated and when it will be freed,
+ * allow to support more complex defrag usecases. */
+void *RM_DefragAllocRaw(RedisModuleDefragCtx *ctx, size_t size) {
+    UNUSED(ctx);
+    return activeDefragAllocRaw(size);
+}
+
+/* Free memory for defrag purposes
+ * 
+ * See RM_DefragAllocRaw for more information. */
+void RM_DefragFreeRaw(RedisModuleDefragCtx *ctx, void *ptr) {
+    UNUSED(ctx);
+    activeDefragFreeRaw(ptr);
 }
 
 /* Defrag a RedisModuleString previously allocated by RM_Alloc, RM_Calloc, etc.
@@ -13610,17 +13656,32 @@ int moduleDefragValue(robj *key, robj *value, int dbid) {
 
 /* Call registered module API defrag functions */
 void moduleDefragGlobals(void) {
-    dictIterator *di = dictGetIterator(modules);
-    dictEntry *de;
+    dictForEach(modules, struct RedisModule, module, 
+        if (module->defrag_cb) {
+            RedisModuleDefragCtx defrag_ctx = { 0, NULL, NULL, -1};
+            module->defrag_cb(&defrag_ctx);
+        }
+    );
+}
 
-    while ((de = dictNext(di)) != NULL) {
-        struct RedisModule *module = dictGetVal(de);
-        if (!module->defrag_cb)
-            continue;
-        RedisModuleDefragCtx defrag_ctx = { 0, NULL, NULL, -1};
-        module->defrag_cb(&defrag_ctx);
-    }
-    dictReleaseIterator(di);
+/* Call registered module API defrag start functions */
+void moduleDefragStart(void) {
+    dictForEach(modules, struct RedisModule, module, 
+        if (module->defrag_start_cb) {
+            RedisModuleDefragCtx defrag_ctx = { 0, NULL, NULL, -1};
+            module->defrag_start_cb(&defrag_ctx);
+        }
+    );
+}
+
+/* Call registered module API defrag end functions */
+void moduleDefragEnd(void) {
+    dictForEach(modules, struct RedisModule, module, 
+        if (module->defrag_end_cb) {
+            RedisModuleDefragCtx defrag_ctx = { 0, NULL, NULL, -1};
+            module->defrag_end_cb(&defrag_ctx);
+        }
+    );
 }
 
 /* Returns the name of the key currently being processed.
@@ -13980,7 +14041,10 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(GetCurrentCommandName);
     REGISTER_API(GetTypeMethodVersion);
     REGISTER_API(RegisterDefragFunc);
+    REGISTER_API(RegisterDefragCallbacks);
     REGISTER_API(DefragAlloc);
+    REGISTER_API(DefragAllocRaw);
+    REGISTER_API(DefragFreeRaw);
     REGISTER_API(DefragRedisModuleString);
     REGISTER_API(DefragShouldStop);
     REGISTER_API(DefragCursorSet);

@@ -2,8 +2,13 @@
  * Copyright (c) 2009-Present, Redis Ltd.
  * All rights reserved.
  *
+ * Copyright (c) 2024-present, Valkey contributors.
+ * All rights reserved.
+ *
  * Licensed under your choice of the Redis Source Available License 2.0
  * (RSALv2) or the Server Side Public License v1 (SSPLv1).
+ *
+ * Portions of this file are available under BSD3 terms; see REDISCONTRIBUTIONS for more information.
  */
 
 #include "server.h"
@@ -734,6 +739,8 @@ long long getInstantaneousMetric(int metric) {
  *
  * The function always returns 0 as it never terminates the client. */
 int clientsCronResizeQueryBuffer(client *c) {
+    /* If the client query buffer is NULL, it is using the reusable query buffer and there is nothing to do. */
+    if (c->querybuf == NULL) return 0;
     size_t querybuf_size = sdsalloc(c->querybuf);
     time_t idletime = server.unixtime - c->lastinteraction;
 
@@ -743,7 +750,18 @@ int clientsCronResizeQueryBuffer(client *c) {
         /* There are two conditions to resize the query buffer: */
         if (idletime > 2) {
             /* 1) Query is idle for a long time. */
-            c->querybuf = sdsRemoveFreeSpace(c->querybuf, 1);
+            size_t remaining = sdslen(c->querybuf) - c->qb_pos;
+            if (!(c->flags & CLIENT_MASTER) && !remaining) {
+                /* If the client is not a master and no data is pending,
+                 * The client can safely use the reusable query buffer in the next read - free the client's querybuf. */
+                sdsfree(c->querybuf);
+                /* By setting the querybuf to NULL, the client will use the reusable query buffer in the next read.
+                 * We don't move the client to the reusable query buffer immediately, because if we allocated a private
+                 * query buffer for the client, it's likely that the client will use it again soon. */
+                c->querybuf = NULL;
+            } else {
+                c->querybuf = sdsRemoveFreeSpace(c->querybuf, 1);
+            }
         } else if (querybuf_size > PROTO_RESIZE_THRESHOLD && querybuf_size/2 > c->querybuf_peak) {
             /* 2) Query buffer is too big for latest peak and is larger than
              *    resize threshold. Trim excess space but only up to a limit,
@@ -759,7 +777,7 @@ int clientsCronResizeQueryBuffer(client *c) {
 
     /* Reset the peak again to capture the peak memory usage in the next
      * cycle. */
-    c->querybuf_peak = sdslen(c->querybuf);
+    c->querybuf_peak = c->querybuf ? sdslen(c->querybuf) : 0;
     /* We reset to either the current used, or currently processed bulk size,
      * which ever is bigger. */
     if (c->bulklen != -1 && (size_t)c->bulklen + 2 > c->querybuf_peak) c->querybuf_peak = c->bulklen + 2;
@@ -834,8 +852,9 @@ size_t ClientsPeakMemInput[CLIENTS_PEAK_MEM_USAGE_SLOTS] = {0};
 size_t ClientsPeakMemOutput[CLIENTS_PEAK_MEM_USAGE_SLOTS] = {0};
 
 int clientsCronTrackExpansiveClients(client *c, int time_idx) {
-    size_t in_usage = sdsZmallocSize(c->querybuf) + c->argv_len_sum +
-	              (c->argv ? zmalloc_size(c->argv) : 0);
+    size_t qb_size = c->querybuf ? sdsZmallocSize(c->querybuf) : 0;
+    size_t argv_size = c->argv ? zmalloc_size(c->argv) : 0;
+    size_t in_usage = qb_size + c->argv_len_sum + argv_size;
     size_t out_usage = getClientOutputBufferMemoryUsage(c);
 
     /* Track the biggest values observed so far in this slot. */
@@ -2055,7 +2074,7 @@ void initServerConfig(void) {
         server.bindaddr[j] = zstrdup(default_bindaddr[j]);
     memset(server.listeners, 0x00, sizeof(server.listeners));
     server.active_expire_enabled = 1;
-    server.lazy_expire_disabled = 0;
+    server.allow_access_expired = 0;
     server.skip_checksum_validation = 0;
     server.loading = 0;
     server.async_loading = 0;
@@ -2671,7 +2690,7 @@ void initServer(void) {
         flags |= KVSTORE_FREE_EMPTY_DICTS;
     }
     for (j = 0; j < server.dbnum; j++) {
-        server.db[j].keys = kvstoreCreate(&dbDictType, slot_count_bits, flags);
+        server.db[j].keys = kvstoreCreate(&dbDictType, slot_count_bits, flags | KVSTORE_ALLOC_META_KEYS_HIST);
         server.db[j].expires = kvstoreCreate(&dbExpiresDictType, slot_count_bits, flags);
         server.db[j].hexpires = ebCreate();
         server.db[j].expires_cursor = 0;
@@ -5502,7 +5521,7 @@ void releaseInfoSectionDict(dict *sec) {
 dict *genInfoSectionDict(robj **argv, int argc, char **defaults, int *out_all, int *out_everything) {
     char *default_sections[] = {
         "server", "clients", "memory", "persistence", "stats", "replication",
-        "cpu", "module_list", "errorstats", "cluster", "keyspace", NULL};
+        "cpu", "module_list", "errorstats", "cluster", "keyspace", "keysizes", NULL};
     if (!defaults)
         defaults = default_sections;
 
@@ -6130,6 +6149,60 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
         }
     }
 
+    /* keysizes */
+    if (all_sections || (dictFind(section_dict,"keysizes") != NULL)) {
+        if (sections++) info = sdscat(info,"\r\n");
+        info = sdscatprintf(info, "# Keysizes\r\n");
+        
+        char *typestr[] = {
+            [OBJ_STRING] = "distrib_strings_sizes",
+            [OBJ_LIST] = "distrib_lists_items",
+            [OBJ_SET] = "distrib_sets_items",
+            [OBJ_ZSET] = "distrib_zsets_items",
+            [OBJ_HASH] = "distrib_hashes_items"
+        };
+        serverAssert(sizeof(typestr)/sizeof(typestr[0]) == OBJ_TYPE_BASIC_MAX);
+        
+        for (int dbnum = 0; dbnum < server.dbnum; dbnum++) {
+            char *expSizeLabels[] = {
+                "1",   "2",  "4",  "8",  "16",  "32",  "64",  "128",  "256",  "512", /* Byte */
+                "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", /* Kilo */
+                "1M", "2M", "4M", "8M", "16M", "32M", "64M", "128M", "256M", "512M", /* Mega */
+                "1G", "2G", "4G", "8G", "16G", "32G", "64G", "128G", "256G", "512G", /* Giga */
+                "1T", "2T", "4T", "8T", "16T", "32T", "64T", "128T", "256T", "512T", /* Tera */
+                "1P", "2P", "4P", "8P", "16P", "32P", "64P", "128P", "256P", "512P", /* Peta */
+                "1E", "2E", "4E", "8E"                                               /* Exa */
+            };
+                                 
+            if (kvstoreSize(server.db[dbnum].keys) == 0)
+                continue;
+            
+            for (int type = 0; type < OBJ_TYPE_BASIC_MAX; type++) {
+                uint64_t *kvstoreHist = kvstoreGetMetadata(server.db[dbnum].keys)->keysizes_hist[type];
+                char buf[10000];
+                int cnt = 0, buflen = 0;
+
+                /* Print histogram to temp buf[]. First bin is garbage */
+                buflen += snprintf(buf + buflen, sizeof(buf) - buflen, "db%d_%s:", dbnum, typestr[type]);
+
+                for (int i = 0; i < MAX_KEYSIZES_BINS; i++) {
+                    if (kvstoreHist[i] == 0) 
+                        continue;
+                    
+                    int res = snprintf(buf + buflen, sizeof(buf) - buflen,
+                                       (cnt == 0) ? "%s=%llu" : ",%s=%llu", 
+                                       expSizeLabels[i], (unsigned long long) kvstoreHist[i]);
+                    if (res < 0) break;
+                    buflen += res;
+                    cnt += kvstoreHist[i];
+                }
+
+                /* Print the temp buf[] to the info string */
+                if (cnt) info = sdscatprintf(info, "%s\r\n", buf);
+            }
+        }
+    }
+
     /* Get info from modules.
      * Returned when the user asked for "everything", "modules", or a specific module section.
      * We're not aware of the module section names here, and we rather avoid the search when we can.
@@ -6567,7 +6640,7 @@ void dismissMemory(void* ptr, size_t size_hint) {
 void dismissClientMemory(client *c) {
     /* Dismiss client query buffer and static reply buffer. */
     dismissMemory(c->buf, c->buf_usable_size);
-    dismissSds(c->querybuf);
+    if (c->querybuf) dismissSds(c->querybuf);
     /* Dismiss argv array only if we estimate it contains a big buffer. */
     if (c->argc && c->argv_len_sum/c->argc >= server.page_size) {
         for (int i = 0; i < c->argc; i++) {
@@ -7212,6 +7285,11 @@ int main(int argc, char **argv) {
         loadDataFromDisk();
         aofOpenIfNeededOnServerStart();
         aofDelHistoryFiles();
+        /* While loading data, we delay applying "appendonly" config change.
+         * If there was a config change while we were inside loadDataFromDisk()
+         * above, we'll apply it here. */
+        applyAppendOnlyConfig();
+
         if (server.cluster_enabled) {
             serverAssert(verifyClusterConfigWithData() == C_OK);
         }
