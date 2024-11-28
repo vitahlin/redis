@@ -72,7 +72,6 @@ jobs:
       run: ./src/redis-server test all --accurate
 
   test-ubuntu-jemalloc-fortify:
-    runs-on: ubuntu-latest
     if: |
       (github.event_name == 'workflow_dispatch' || (github.event_name != 'workflow_dispatch' && github.repository == 'redis/redis')) &&
       !contains(github.event.inputs.skipjobs, 'fortify')
