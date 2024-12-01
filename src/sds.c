@@ -65,6 +65,32 @@ static inline size_t sdsTypeMaxSize(char type) {
     return -1; /* this is equivalent to the max SDS_TYPE_64 or SDS_TYPE_32 */
 }
 
+int testCodecov1() {
+    int a, b, c;
+    a = 136337838;
+    b = a * 2;
+    c = a + b;
+    return c;
+}
+
+
+int testCodecov2() {
+    int a, b, c;
+    a = 1363378323;
+    b = a * 2;
+    c = a + b + b;
+    return c;
+}
+
+int testCodecov3() {
+    int a, b, c;
+    a = 1363378;
+    b = a * 2;
+    c = a + b + b + a;
+    return c;
+}
+
+
 /* Create a new sds string with the content specified by the 'init' pointer
  * and 'initlen'.
  * If NULL is used for 'init' the string is initialized with zero bytes.
