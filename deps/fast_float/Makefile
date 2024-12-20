@@ -7,6 +7,8 @@ CFLAGS=-Wall -O3
 FASTFLOAT_CFLAGS=-std=c++11 -DFASTFLOAT_ALLOWS_LEADING_PLUS
 LDFLAGS=
 
+R_CC=$(CC) $(R_CFLAGS)
+
 libfast_float: fast_float_strtod.o
 	$(AR) -r libfast_float.a fast_float_strtod.o
 
@@ -15,7 +17,7 @@ libfast_float: fast_float_strtod.o
 32bit: libfast_float
 
 fast_float_strtod.o: fast_float_strtod.cpp
-	$(CXX) $(CFLAGS) $(FASTFLOAT_CFLAGS) -c fast_float_strtod.cpp $(LDFLAGS)
+	$(R_CC) $(CFLAGS) $(FASTFLOAT_CFLAGS) -c fast_float_strtod.cpp $(LDFLAGS)
 
 clean:
 	rm -f *.o
