@@ -491,7 +491,7 @@ lcov:
 	$(MAKE) gcov
 	@(set -e; cd ..; ./runtest)
 	@geninfo -o redis.info .
-	@genhtml --legend -o lcov-html redis.info
+	@genhtml --legend -o lcov-html --ignore-errors inconsistent,corrupt redis.info
 
 .PHONY: lcov
 

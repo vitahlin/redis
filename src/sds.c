@@ -198,6 +198,18 @@ void sdsupdatelen(sds s) {
     sdssetlen(s, reallen);
 }
 
+int codecovTest1(){
+    return 0;
+}
+
+int codecovTest2(){
+    return 0;
+}
+
+int codecovTest3(){
+    return 0;
+}
+
 /* Modify an sds string in-place to make it empty (zero length).
  * However all the existing buffer is not discarded but set as free space
  * so that next append operations will not require allocations up to the

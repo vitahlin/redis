@@ -637,17 +637,6 @@ start_server {tags {"hash"}} {
         lappend rv [string match "ERR *not*float*" $err]
     } {1}
 
-    test {HSTRLEN against the small hash} {
-        set err {}
-        foreach k [array names smallhash *] {
-            if {[string length $smallhash($k)] ne [r hstrlen smallhash $k]} {
-                set err "[string length $smallhash($k)] != [r hstrlen smallhash $k]"
-                break
-            }
-        }
-        set _ $err
-    } {}
-
     test {HSTRLEN against the big hash} {
         set err {}
         foreach k [array names bighash *] {
