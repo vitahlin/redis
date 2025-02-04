@@ -198,16 +198,16 @@ void sdsupdatelen(sds s) {
     sdssetlen(s, reallen);
 }
 
-int codecovTest1(){
-    return 0;
+int codecovTest1(int a, int b){
+    return a+b;
 }
 
-int codecovTest2(){
-    return 0;
+int codecovTest2(int a,int b){
+    return a*b;
 }
 
-int codecovTest3(){
-    return 0;
+int codecovTest3(int a,int b){
+    return a-b;
 }
 
 /* Modify an sds string in-place to make it empty (zero length).
