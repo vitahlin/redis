@@ -210,6 +210,18 @@ int codecovTest3(int a,int b){
     return a-b;
 }
 
+int codecovTest4(int a,int b){
+    return a-b+a;
+}
+
+int codecovTest5(int a,int b){
+    return a-b+a-b;
+}
+
+int codecovTest6(int a,int b){
+    return a-b+a-b+b;
+}
+
 /* Modify an sds string in-place to make it empty (zero length).
  * However all the existing buffer is not discarded but set as free space
  * so that next append operations will not require allocations up to the
