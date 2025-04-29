@@ -2226,6 +2226,10 @@ void initServerConfig(void) {
         server.oom_score_adj_values[j] = configOOMScoreAdjValuesDefaults[j];
 
     /* Double constants initialization */
+    /**
+     * 手动定义正无穷，负无穷，非数字
+     * 直接写 INFINITY、NAN 可能不够兼容或可移植。
+     */
     R_Zero = 0.0;
     R_PosInf = 1.0/R_Zero;
     R_NegInf = -1.0/R_Zero;
@@ -3665,6 +3669,7 @@ void call(client *c, int flags) {
     if (monotonicGetType() == MONOTONIC_CLOCK_HW)
         monotonic_start = getMonotonicUs();
 
+    // 这个就是真正执行命令的地方
     c->cmd->proc(c);
 
     /* Clear the CLIENT_REPROCESSING_COMMAND flag after the proc is executed. */
@@ -4063,6 +4068,7 @@ int processCommand(client *c) {
                            (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_READONLY));
     int is_write_command = (cmd_flags & CMD_WRITE) ||
                            (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_WRITE));
+    // 当前命令（或事务中的子命令）是否是 “内存不足时禁止执行” 的命令
     int is_denyoom_command = (cmd_flags & CMD_DENYOOM) ||
                              (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_DENYOOM));
     int is_denystale_command = !(cmd_flags & CMD_STALE) ||
@@ -4091,6 +4097,12 @@ int processCommand(client *c) {
 
     /* Check if the user can run this command according to the current
      * ACLs. */
+    /**
+     * Redis 6.0 以后引入了用户管理，你可以定义不同的用户，比如 admin、readonly。
+     * 给每个用户配置：
+     *  允许执行哪些命令（比如只允许 GET，禁止 DEL）。
+     *  只能访问哪些 key（可以设 key pattern，比如只能访问 user:* 开头的 key）。
+     */
     int acl_errpos;
     int acl_retval = ACLCheckAllPerm(c,&acl_errpos);
     if (acl_retval != ACL_OK) {
