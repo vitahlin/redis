@@ -2127,7 +2127,9 @@ struct redisServer {
     int sort_bypattern;
     int sort_store;
     /* Zip structure config, see redis.conf for more information  */
+    // 当一个 Hash 对象使用 listpack 编码时，最多允许包含的字段对（field-value）数量。超过这个数量就会转换成 hashtable 编码。
     size_t hash_max_listpack_entries;
+    // 哈希对象（Hash）在使用 Listpack 编码时，字段值（field 或 value）的最大长度限制。
     size_t hash_max_listpack_value;
     size_t set_max_intset_entries;
     size_t set_max_listpack_entries;

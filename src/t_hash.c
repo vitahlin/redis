@@ -605,6 +605,7 @@ void hashTypeTryConversion(redisDb *db, robj *o, robj **argv, int start, int end
     int i;
     size_t sum = 0;
 
+    // 已经是Hash类型，不再转换
     if (o->encoding != OBJ_ENCODING_LISTPACK && o->encoding != OBJ_ENCODING_LISTPACK_EX)
         return;
 
@@ -624,6 +625,7 @@ void hashTypeTryConversion(redisDb *db, robj *o, robj **argv, int start, int end
             continue;
         size_t len = sdslen(argv[i]->ptr);
         if (len > server.hash_max_listpack_value) {
+            // 转换后，直接return了，不会报错
             hashTypeConvert(o, OBJ_ENCODING_HT, &db->hexpires);
             return;
         }
@@ -911,13 +913,16 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
         zl = o->ptr;
         fptr = lpFirst(zl);
         if (fptr != NULL) {
+            // 查询对应key的已有数据
             fptr = lpFind(zl, fptr, (unsigned char*)field, sdslen(field), 1);
             if (fptr != NULL) {
+                // 已经存在数据，更新
                 /* Grab pointer to the value (fptr points to the field) */
                 vptr = lpNext(zl, fptr);
                 serverAssert(vptr != NULL);
 
                 /* Replace value */
+                // TODO:vitah 为什么不判断值一致的时候直接不替换
                 zl = lpReplace(zl, &vptr, (unsigned char*)value, sdslen(value));
                 update = 1;
             }
@@ -931,6 +936,7 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
         o->ptr = zl;
 
         /* Check if the listpack needs to be converted to a hash table */
+        // TODO:vitah 这里只是检查字段对数量，如果update=1是不是不需要计算
         if (hashTypeLength(o, 0) > server.hash_max_listpack_entries)
             hashTypeConvert(o, OBJ_ENCODING_HT, &db->hexpires);
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_EX) {
@@ -970,6 +976,7 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
                              HASH_LP_NO_TTL);
 
         /* Check if the listpack needs to be converted to a hash table */
+        // TODO:vitah 这里只是检查字段对数量，如果update=1是不是不需要计算
         if (hashTypeLength(o, 0) > server.hash_max_listpack_entries)
             hashTypeConvert(o, OBJ_ENCODING_HT, &db->hexpires);
 
@@ -1304,6 +1311,8 @@ int hashTypeDelete(robj *o, void *field, int isSdsField) {
 /* Return the number of elements in a hash.
  *
  * Note, subtractExpiredFields=1 might be pricy in case there are many HFEs
+ *
+ * 计算一个 Hash 类型对象的字段数量（field 数量），可选地排除掉已经过期但尚未被清理的字段。
  */
 unsigned long hashTypeLength(const robj *o, int subtractExpiredFields) {
     unsigned long length = ULONG_MAX;
@@ -2190,6 +2199,7 @@ void hsetCommand(client *c) {
     int i, created = 0;
     robj *o;
 
+    // 这个命令的参数一定是偶数的，如果是奇数，直接返回错误
     if ((c->argc % 2) == 1) {
         addReplyErrorArity(c);
         return;
@@ -2216,6 +2226,8 @@ void hsetCommand(client *c) {
     unsigned long l = hashTypeLength(o, 0);
     updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_HASH, l - created, l);
     notifyKeyspaceEvent(NOTIFY_HASH,"hset",c->argv[1],c->db->id);
+
+    // 表示自上次持久化（RDB 或 AOF）以来，对数据库做了多少次修改操作。
     server.dirty += (c->argc - 2)/2;
 }
 
