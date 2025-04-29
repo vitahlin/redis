@@ -611,6 +611,7 @@ void hashTypeTryConversion(redisDb *db, robj *o, robj **argv, int start, int end
     /* We guess that most of the values in the input are unique, so
      * if there are enough arguments we create a pre-sized hash, which
      * might over allocate memory if there are duplicates. */
+    // TODO:vitah 是不是应该获取原来的数量+new_fields再对比
     size_t new_fields = (end - start + 1) / 2;
     if (new_fields > server.hash_max_listpack_entries) {
         hashTypeConvert(o, OBJ_ENCODING_HT, &db->hexpires);
@@ -899,6 +900,7 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
      * hashTypeTryConversion, so this check will be a NOP. */
     if (o->encoding == OBJ_ENCODING_LISTPACK  ||
         o->encoding == OBJ_ENCODING_LISTPACK_EX) {
+        /** 这里只校验长度，因为hset在调用这方法前已经检查了数量是否会导致转换 */
         if (sdslen(field) > server.hash_max_listpack_value || sdslen(value) > server.hash_max_listpack_value)
             hashTypeConvert(o, OBJ_ENCODING_HT, &db->hexpires);
     }
@@ -1555,10 +1557,19 @@ hfield hashTypeCurrentObjectNewHfield(hashTypeIterator *hi) {
     return hf;
 }
 
+/**
+ * 查找指定 key 对应的 Hash 对象，如果没有就创建一个新的
+ * 静态函数，返回一个 Redis 对象指针（robj *），表示 Hash 类型的值。
+ */
 static robj *hashTypeLookupWriteOrCreate(client *c, robj *key) {
+    /**
+     * 从当前客户端所在的数据库中，用写操作语义查找指定 key 对应的对象。
+     * 这个过程包括了键的过期检查，并会触发写时事件（比如用于 AOF、复制等）
+     */
     robj *o = lookupKeyWrite(c->db,key);
     if (checkType(c,o,OBJ_HASH)) return NULL;
 
+    // 没找到创建一个新的Hash，默认编码模式OBJ_ENCODING_LISTPACK
     if (o == NULL) {
         o = createHashObject();
         dbAdd(c->db,key,o);
@@ -2184,7 +2195,9 @@ void hsetCommand(client *c) {
         return;
     }
 
+    // 获取对应键，如果为空则创建一个新的 Hash 对象，已经存在对象并且不是Hash类型，直接返回
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
+
     hashTypeTryConversion(c->db,o,c->argv,2,c->argc-1);
 
     for (i = 2; i < c->argc; i += 2)

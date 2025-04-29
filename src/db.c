@@ -192,6 +192,7 @@ robj *lookupKey(redisDb *db, robj *key, int flags, dictEntry **deref) {
         /* TODO: Use separate misses stats and notify event for WRITE */
     }
 
+    // 如果找到了 key 且调用者传入了 deref 指针，则把底层 dictEntry 返回去
     if (val && deref) *deref = de;
     return val;
 }

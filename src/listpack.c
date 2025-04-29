@@ -121,6 +121,7 @@ static inline void lpAssertValidEntry(unsigned char* lp, size_t lpbytes, unsigne
  * Total Bytes header field */
 #define LISTPACK_MAX_SAFETY_SIZE (1<<30)
 int lpSafeToAdd(unsigned char* lp, size_t add) {
+    // TODO:vitah 是否存在溢出可能
     size_t len = lp? lpGetTotalBytes(lp): 0;
     if (len + add > LISTPACK_MAX_SAFETY_SIZE)
         return 0;
