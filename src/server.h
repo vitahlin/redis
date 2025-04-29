@@ -3398,6 +3398,9 @@ typedef struct dictExpireMetadata {
 /* Hash data type */
 #define HASH_SET_TAKE_FIELD (1<<0)
 #define HASH_SET_TAKE_VALUE (1<<1)
+
+// 表示 设置 Hash 字段时会复制传入的 field 和 value 值（而不是借用调用方的指针）。
+//这个是默认选项，目的是 安全地保留 key/value 数据副本，避免指针悬挂或数据被外部修改。
 #define HASH_SET_COPY 0
 
 /* Hash field lazy expiration flags. Used by core hashTypeGetValue() and its callers */

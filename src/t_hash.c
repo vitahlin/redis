@@ -509,6 +509,7 @@ static void listpackExUpdateExpiry(robj *o, sds field,
     } else {
         ent[1].lval = val;
     }
+    // TODO:vitah 是否存在溢出风险
     ent[2].lval = expire_at;
 
     listpackExAddInternal(o, ent);
@@ -892,6 +893,8 @@ int hashTypeExists(redisDb *db, robj *o, sds field, int hfeFlags, int *isHashDel
  */
 #define HASH_SET_TAKE_FIELD  (1<<0)
 #define HASH_SET_TAKE_VALUE  (1<<1)
+
+// 表示 保留已有字段的 TTL（过期时间），在设置新的 field-value 时 不要清除它的过期设置。
 #define HASH_SET_KEEP_TTL (1<<2)
 #define HASH_SET_COPY 0
 int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {

@@ -1964,7 +1964,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                 return NULL;
             }
             dec = getDecodedObject(ele);
-            // TODO:vitah len命名可以调整
+            // TODO:vitah len命名是否可以调整
             size_t len = sdslen(dec->ptr);
             quicklistPushTail(o->ptr, dec->ptr, len);
             decrRefCount(dec);
