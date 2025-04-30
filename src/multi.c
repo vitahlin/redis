@@ -354,6 +354,7 @@ int isWatchedKeyExpired(client *c) {
     return 0;
 }
 
+// TODO:vitah typo
 /* "Touch" a key, so that if this key is being WATCHed by some client the
  * next EXEC will fail.
  *
