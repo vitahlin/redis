@@ -219,10 +219,15 @@ int lpStringToInt64(const char *s, unsigned long slen, int64_t *value) {
  * over-allocated memory can be shrunk by `lpShrinkToFit`.
  * */
 unsigned char *lpNew(size_t capacity) {
+    //LP_HDR_SIZE + 1 = 7, 最小分配7个字节的空间
+    // +1 是为了存放 listpack 的结束标志 LP_EOF
     unsigned char *lp = lp_malloc(capacity > LP_HDR_SIZE+1 ? capacity : LP_HDR_SIZE+1);
     if (lp == NULL) return NULL;
+    // listpack总容量大小
     lpSetTotalBytes(lp,LP_HDR_SIZE+1);
+    // 设置元素个数
     lpSetNumElements(lp,0);
+    // lp[6]即第7个字节，设置为0XFF
     lp[LP_HDR_SIZE] = LP_EOF;
     return lp;
 }

@@ -24,6 +24,7 @@ robj *createObject(int type, void *ptr) {
     o->type = type;
     o->encoding = OBJ_ENCODING_RAW;
     o->ptr = ptr;
+    // 初始化引用计数为1
     o->refcount = 1;
     o->lru = 0;
     return o;

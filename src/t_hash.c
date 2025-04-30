@@ -939,7 +939,7 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
         o->ptr = zl;
 
         /* Check if the listpack needs to be converted to a hash table */
-        // TODO:vitah 这里只是检查字段对数量，如果update=1是不是不需要计算
+        // TODO:vitah 这里只是检查字段对数量，如果update=1是不是不需要调用
         if (hashTypeLength(o, 0) > server.hash_max_listpack_entries)
             hashTypeConvert(o, OBJ_ENCODING_HT, &db->hexpires);
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_EX) {
