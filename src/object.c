@@ -292,11 +292,11 @@ kvobj *kvobjSet(sds key, robj *val, long long expire) {
         size += (expire != -1) * sizeof(long long);
         size += 4 + len; /* embstr header (3) + nullterm (1) */
 
-        // 如果总大小不超过缓存行（通常 64 字节），则用 嵌入式结构（kvobjCreateEmbedString()）来创建；
-        // 否则退回常规分配 kvobjCreate()
+        // 如果总大小不超过缓存行（通常 64 字节），则用 嵌入式结构 kvobjCreateEmbedString来创建；
         if (size <= CACHE_LINE_SIZE) {
             kv = kvobjCreateEmbedString(val->ptr, len, key, expire);
         } else {
+            // 否则使用常规分配 kvobjCreate()
             kv = kvobjCreate(OBJ_STRING, key, sdsnewlen(val->ptr, len), expire);
         }
 
