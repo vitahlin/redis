@@ -86,6 +86,8 @@ typedef struct redisObject robj;
  *    | 16 bytes     | 1 byte       | 1      +   5   + 1 | 3    +      7    + 1 |
  *    +--------------+--------------+--------------------+----------------------+
  *
+ * kvobj 是 Redis 中一种特殊用途的 robj（即 redisObject），它包含了 key 本身（嵌入的 key）。
+ * robj 是一个通用对象类型，被广泛用于表示字符串、list、set、zset 等 Redis 数据类型。
  */
 typedef struct redisObject kvobj;
 
@@ -1030,17 +1032,22 @@ struct RedisModuleDigest {
 #define OBJ_STATIC_REFCOUNT ((1 << OBJ_REFCOUNT_BITS) - 2) /* Object allocated in the stack. */
 #define OBJ_FIRST_SPECIAL_REFCOUNT OBJ_STATIC_REFCOUNT
 
+// 总共16字节
 struct redisObject {
-    unsigned type:4;
-    unsigned encoding:4;
+    unsigned type: 4; // 4位
+    unsigned encoding: 4; // 4位
+    // 24位，到这里总共32位，4字节
     unsigned lru:LRU_BITS; /* LRU time (relative to global lru_clock) or
                             * LFU data (least significant 8 bits frequency
                             * and most significant 16 bits access time). */
+    // 32位，4字节
     unsigned iskvobj : 1;   /* 1 if this struct serves as a kvobj base */
     unsigned expirable : 1; /* 1 if this key has expiration time attached.
                              * If set, then this object is of type kvobj */
     // 记录当前有多少个地方在使用（引用）这个 redisObject 对象，防止被提前释放或内存泄漏。
     unsigned refcount : OBJ_REFCOUNT_BITS;
+
+    // 8字节
     void *ptr;
 };
 

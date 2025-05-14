@@ -232,7 +232,11 @@ robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
 }
 
 sds kvobjGetKey(const kvobj *kv) {
+    // kv + 1 是指针运算，表示跳过整个 kvobj（即 redisObject 结构体）的大小，指向其后面的附加数据。
+    // kvobj 是一个结构体对象，这个操作实际上就是“跳到结构体后面的附加区域”。
     unsigned char *data = (void *)(kv + 1);
+
+    // kvobj 是可过期的（expirable 为 1），那么结构体后紧跟着有一个 long long（8 字节）的过期时间字段，需要跳过它。
     if (kv->expirable) {
         /* Skip expire field */
         data += sizeof(long long);
