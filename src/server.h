@@ -1039,6 +1039,7 @@ struct redisObject {
     unsigned iskvobj : 1;   /* 1 if this struct serves as a kvobj base */
     unsigned expirable : 1; /* 1 if this key has expiration time attached.
                              * If set, then this object is of type kvobj */
+    // 记录当前有多少个地方在使用（引用）这个 redisObject 对象，防止被提前释放或内存泄漏。
     unsigned refcount : OBJ_REFCOUNT_BITS;
     void *ptr;
 };
