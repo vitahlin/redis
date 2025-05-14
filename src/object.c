@@ -231,6 +231,9 @@ robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
     return o;
 }
 
+/**
+ * todo:vitah 是不是可以先判断是不是kvobj类型，如果不是直接返回
+ */
 sds kvobjGetKey(const kvobj *kv) {
     // kv + 1 是指针运算，表示跳过整个 kvobj（即 redisObject 结构体）的大小，指向其后面的附加数据。
     // kvobj 是一个结构体对象，这个操作实际上就是“跳到结构体后面的附加区域”。
@@ -241,9 +244,14 @@ sds kvobjGetKey(const kvobj *kv) {
         /* Skip expire field */
         data += sizeof(long long);
     }
+    // 如果这个对象确实是一个 kvobj（iskvobj 为 1），接下来的数据就是我们要解析的键数据。
+    // [kvobj | (可选) expire | key-hdr-size | sds-hdr | key-string + \0 ]
     if (kv->iskvobj) {
+        // 1字节的hdr_size 通常是 sds 的元信息，比如 sdshdr5、sdshdr8，包含字符串长度等。
         uint8_t hdr_size = *(uint8_t *)data;
+        // 跳过这个 hdr_size 字节的元信息，再加上最前面的那 1 个字节（hdr_size 自身）。
         data += 1 + hdr_size;
+        // 把它强转为 sds 类型并返回，即可获得嵌入的 key
         return (sds)data;
     }
     return NULL;
