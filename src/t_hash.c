@@ -1530,9 +1530,16 @@ hfield hashTypeCurrentObjectNewHfield(hashTypeIterator *hi) {
     return hf;
 }
 
+/**
+ * 查找给定 key 对应的 kvobj（键值对象），如果 key 不存在，则创建一个新的 hash 类型对象并插入到数据库中。
+ * 返回的是一个指向 kvobj 的指针。
+ */
 static kvobj *hashTypeLookupWriteOrCreate(client *c, robj *key) {
     dictEntryLink link;
     kvobj *kv = lookupKeyWriteWithLink(c->db, key, &link);
+
+    // 如果 kv 存在但不是 OBJ_HASH 类型，则返回 NULL。
+    // checkType内部会处理类型错误的回复和客户端状态，这里可以直接返回
     if (checkType(c, kv, OBJ_HASH)) return NULL;
 
     if (kv == NULL) {

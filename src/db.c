@@ -249,6 +249,10 @@ kvobj *lookupKeyWrite(redisDb *db, robj *key) {
  * link - If key found, updated to link the key.
  *        If key not found, updated to the bucket where the key should be added.
  *        If key not found and dict is empty, it is set to NULL
+ * 类似于 lookupKeyWrite()，但接受一个可选的 `link` 引用参数
+ * link - 如果找到了 key，会被更新为指向该 key 的链接；
+ *        如果没有找到 key，会被更新为 key 应该被添加到的桶（bucket）的位置；
+ *        如果没有找到 key 且字典为空，则会被设置为 NULL。
  */
 kvobj *lookupKeyWriteWithLink(redisDb *db, robj *key, dictEntryLink *link) {
     return lookupKey(db, key, LOOKUP_NONE | LOOKUP_WRITE, link);
@@ -282,6 +286,11 @@ kvobj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply) {
  *
  * link - Optional link to bucket where the key should be added.
  *          On return, get updated, by need, to the inserted key.
+ * 将一个键值对添加到 Redis 数据库中（用于底层 kvstore 结构），并使用事先计算好的 link 插入点来提高效率。
+ *  redisDb *db：当前操作的 Redis 数据库。
+ *  robj *key：Redis 对象格式的键。
+ *  robj **valref：指向值对象的引用，插入后将更新为 kvobj。
+ *  dictEntryLink *link：预先查找得到的插入位置信息，用于避免重复计算插入位置。
  */
 kvobj *dbAddByLink(redisDb *db, robj *key, robj **valref, dictEntryLink *link) {
     int slot = getKeySlot(key->ptr);
@@ -290,7 +299,7 @@ kvobj *dbAddByLink(redisDb *db, robj *key, robj **valref, dictEntryLink *link) {
     initObjectLRUOrLFU(kv);
     kvstoreDictSetAtLink(db->keys, slot, kv, link, 1);
     signalKeyAsReady(db, key, kv->type);
-    notifyKeyspaceEvent(NOTIFY_NEW,"new",key,db->id);
+    notifyKeyspaceEvent(NOTIFY_NEW, "new", key, db->id);
     updateKeysizesHist(db, slot, kv->type, -1, getObjectLength(kv)); /* add hist */
     *valref = kv;
     return kv;

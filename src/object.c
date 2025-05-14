@@ -272,8 +272,12 @@ kvobj *kvobjSetExpire(kvobj *kv, long long expire) {
 
 /* This functions may reallocate the value. The new allocation is returned and
  * the old object's reference counter is decremented and possibly freed. Use the
- * returned object instead of 'val' after calling this function. */
+ * returned object instead of 'val' after calling this function.
+ * 将一个 robj（Redis 对象）封装成 kvobj 的核心逻辑。它根据对象类型和引用情况选择是否复用或复制数据，
+ * 并构造一个新的 kvobj（可能是嵌入式的、也可能是常规堆分配的）
+ */
 kvobj *kvobjSet(sds key, robj *val, long long expire) {
+    // 特殊处理 EMBSTR 编码的字符串值，edis 针对短字符串（≤ 44 字节）的一种优化编码格式，数据和元数据放在一块内存中。
     if (val->type == OBJ_STRING && val->encoding == OBJ_ENCODING_EMBSTR) {
         kvobj *kv;
         size_t len = sdslen(val->ptr);
@@ -283,6 +287,9 @@ kvobj *kvobjSet(sds key, robj *val, long long expire) {
         size += (key != NULL) * (sdslen(key) + 3); /* hdr size (1) + hdr (1) + nullterm (1) */
         size += (expire != -1) * sizeof(long long);
         size += 4 + len; /* embstr header (3) + nullterm (1) */
+
+        // 如果总大小不超过缓存行（通常 64 字节），则用 嵌入式结构（kvobjCreateEmbedString()）来创建；
+        // 否则退回常规分配 kvobjCreate()
         if (size <= CACHE_LINE_SIZE) {
             kv = kvobjCreateEmbedString(val->ptr, len, key, expire);
         } else {
@@ -290,6 +297,7 @@ kvobj *kvobjSet(sds key, robj *val, long long expire) {
         }
 
         kv->lru = val->lru;
+        // 减少旧对象的引用计数（释放可能内存）。
         decrRefCount(val);
         return kv;
     }
@@ -297,6 +305,8 @@ kvobj *kvobjSet(sds key, robj *val, long long expire) {
     /* Create a new object with embedded key. Reuse ptr if possible. */
     void *valptr;
     if (val->refcount == 1) {
+        // 如果 val 只有一个引用，则可以直接复用它的指针。指针赋值完再释放。
+        // valptr已经获得了原 val->ptr 的地址拷贝，指向的内存依旧有效。这里只是把 val->ptr 设为 NULL，并没有释放 valptr 指向的内存。
         /* Reuse the ptr. There are no other references to val. */
         valptr = val->ptr;
         val->ptr = NULL;
