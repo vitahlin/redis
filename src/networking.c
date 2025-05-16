@@ -2144,6 +2144,7 @@ int writeToClient(client *c, int handler_installed) {
         }
         atomicIncr(server.stat_net_output_bytes, totwritten);
     }
+    // 没有越界保护，但是实际情况中很少会出现越界的情况
     c->net_output_bytes += totwritten;
 
     if (nwritten == -1) {
