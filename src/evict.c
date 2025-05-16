@@ -151,6 +151,7 @@ int evictionPoolPopulate(redisDb *db, kvstore *samplekvs, struct evictionPoolEnt
              * frequency of 255. */
             idle = 255-LFUDecrAndReturn(kv);
         } else if (server.maxmemory_policy == MAXMEMORY_VOLATILE_TTL) {
+            // 仅在设置了过期时间的键中，优先淘汰“TTL 最小”（即最快过期）的键。
             /* In this case the sooner the expire the better. */
             idle = ULLONG_MAX - kvobjGetExpire(kv);
         } else {

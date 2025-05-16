@@ -22,7 +22,9 @@
 #endif
 
 /* For objects with large embedded keys, we reserve space for an expire field,
- * so if expire is set later, we don't need to reallocate the object. */
+ * so if expire is set later, we don't need to reallocate the object.
+ * 对于带有较大嵌入式键（key）的对象，我们预留了一个 expire 字段的空间，
+ * 这样即使在之后设置 expire（过期时间）时，也不需要重新分配（reallocate）对象的内存。 */
 #define KEY_SIZE_TO_INCLUDE_EXPIRE_THRESHOLD 128
 
 /* ===================== Creation and parsing of objects ==================== */
@@ -39,6 +41,8 @@
 kvobj *kvobjCreate(int type, const sds key, void *ptr, long long expire) {
     /* Determine embedded key and expiration flags */
     serverAssert(key != NULL);
+
+    // KEY_SIZE_TO_INCLUDE_EXPIRE_THRESHOLD，是如果字符串本身就特别大，直接预留一个过期键的空间
     int has_expire = ((expire != -1) || (sdslen(key) >= KEY_SIZE_TO_INCLUDE_EXPIRE_THRESHOLD));
     
     /* Calculate embedded key size */
@@ -61,7 +65,8 @@ kvobj *kvobjCreate(int type, const sds key, void *ptr, long long expire) {
     o->lru = 0;
     o->iskvobj = 1;
 
-    /* If extra space allows, pre-allocate anyway expiration */
+    /* If extra space allows, pre-allocate anyway expiration
+     * 如果额外空间允许的话，预先分配一个用于过期时间（expiration）的字段 */
     if ((!has_expire) && (bufsize >= min_size + sizeof(long long))) {
         has_expire = 1;
         min_size += sizeof(long long);
@@ -257,6 +262,9 @@ sds kvobjGetKey(const kvobj *kv) {
     return NULL;
 }
 
+/**
+ * 从一个 kvobj 对象中获取其过期时间（expire），如果没有设置过期时间，就返回 -1。
+ */
 long long kvobjGetExpire(const kvobj *kv) {
     unsigned char *data = (void *)(kv + 1);
     if (kv->expirable) {
