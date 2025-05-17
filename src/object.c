@@ -969,6 +969,10 @@ robj *getDecodedObject(robj *o) {
 #define REDIS_COMPARE_BINARY (1<<0)
 #define REDIS_COMPARE_COLL (1<<1)
 
+/**
+ * 这段代码是 Redis 中用于比较两个字符串对象 (robj) 的函数，
+ * 函数名为 compareStringObjectsWithFlags。它根据传入的标志 (flags) 选择使用 字典序比较（字节级别） 或 本地化比较（使用 strcoll）。
+ */
 int compareStringObjectsWithFlags(const robj *a, const robj *b, int flags) {
     serverAssertWithInfo(NULL,a,a->type == OBJ_STRING && b->type == OBJ_STRING);
     char bufa[128], bufb[128], *astr, *bstr;
@@ -1014,10 +1018,12 @@ int collateStringObjects(const robj *a, const robj *b) {
 /* Equal string objects return 1 if the two objects are the same from the
  * point of view of a string comparison, otherwise 0 is returned. Note that
  * this function is faster then checking for (compareStringObject(a,b) == 0)
- * because it can perform some more optimization. */
+ * because it can perform some more optimization.
+ * todo:vitah 既然只是判断是不是相等，是不是可以优化，不需要计算排序
+ */
 int equalStringObjects(robj *a, robj *b) {
     if (a->encoding == OBJ_ENCODING_INT &&
-        b->encoding == OBJ_ENCODING_INT){
+        b->encoding == OBJ_ENCODING_INT) {
         /* If both strings are integer encoded just check if the stored
          * long is the same. */
         return a->ptr == b->ptr;
