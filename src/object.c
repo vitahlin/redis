@@ -179,6 +179,7 @@ static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
      * don't need it now. Then we don't need to realloc if it's needed later. */
     if (!o->expirable && bufsize >= min_size + sizeof(long long)) {
         o->expirable = 1;
+        // todo:vitah 多余的计算
         min_size += sizeof(long long);
     }
 
@@ -266,6 +267,7 @@ sds kvobjGetKey(const kvobj *kv) {
  * 从一个 kvobj 对象中获取其过期时间（expire），如果没有设置过期时间，就返回 -1。
  */
 long long kvobjGetExpire(const kvobj *kv) {
+    // todo:vitah kv->expirable true时再计算
     unsigned char *data = (void *)(kv + 1);
     if (kv->expirable) {
         return *(long long *)data;
