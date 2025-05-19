@@ -2292,7 +2292,7 @@ int hnsw_deserialize_index(HNSW *index) {
  * The function returns NULL on out of memory. */
 hnswCursor *hnsw_cursor_init(HNSW *index) {
     if (pthread_rwlock_wrlock(&index->global_lock) != 0) return NULL;
-    // todo:vitah 是否需要清空结构题，避免内存脏字段
+    // todo:vitah 是否需要清空结构体，避免内存脏字段
     hnswCursor *cursor = hmalloc(sizeof(*cursor));
     if (cursor == NULL) {
         pthread_rwlock_unlock(&index->global_lock);
