@@ -6915,14 +6915,16 @@ void sendChildInfo(childInfoType info_type, size_t keys, char *pname) {
  * of 0 will lead the checking the real size of the allocation.
  * Also please note that the size may be not accurate, so in order to make this
  * solution effective, the judgement for releasing memory pages should not be
- * too strict. */
-void dismissMemory(void* ptr, size_t size_hint) {
+ * too strict.
+ * 告诉操作系统这个内存区域的内容可以丢弃（不再使用），以便节省物理内存页。
+ */
+void dismissMemory(void *ptr, size_t size_hint) {
     if (ptr == NULL) return;
 
     /* madvise(MADV_DONTNEED) can not release pages if the size of memory
      * is too small, we try to release only for the memory which the size
      * is more than half of page size. */
-    if (size_hint && size_hint <= server.page_size/2) return;
+    if (size_hint && size_hint <= server.page_size / 2) return;
 
     zmadvise_dontneed(ptr);
 }

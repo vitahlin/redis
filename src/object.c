@@ -56,6 +56,7 @@ kvobj *kvobjCreate(int type, const sds key, void *ptr, long long expire) {
     min_size += 1 + key_sds_size; /* 1 byte for SDS header size */
 
     /* Allocate object memory */
+    // 实际分配的空间
     size_t bufsize = 0;
     robj *o = zmalloc_usable(min_size, &bufsize);
     o->type = type;
@@ -69,6 +70,7 @@ kvobj *kvobjCreate(int type, const sds key, void *ptr, long long expire) {
      * 如果额外空间允许的话，预先分配一个用于过期时间（expiration）的字段 */
     if ((!has_expire) && (bufsize >= min_size + sizeof(long long))) {
         has_expire = 1;
+        // todo:vitah 多余的计算
         min_size += sizeof(long long);
     }
     o->expirable = has_expire;
