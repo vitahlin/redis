@@ -276,7 +276,9 @@ static inline listNode *watchedKeyGetClientNode(watchedKey *wk) {
     return &wk->node;
 }
 
-/* Watch for the specified key */
+/* Watch for the specified key
+ * 记录客户端正在 WATCH 某个键，以便后续事务（MULTI/EXEC）中，如果这个键被别的客户端修改，当前事务就会被标记为“无效”。
+ */
 void watchForKey(client *c, robj *key) {
     list *clients = NULL;
     listIter li;
