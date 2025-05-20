@@ -125,6 +125,8 @@ static RedisModuleType *VectorSetType;
 static uint64_t VectorSetTypeNextId = 0;
 
 // Default EF value if not specified during creation.
+// HNSW（Hierarchical Navigable Small World）算法的向量检索系统中，EF 是一个重要的参数
+// 控制图构建过程中搜索的宽度，值越大，构建的图越准确（但也越慢、越占内存）。
 #define VSET_DEFAULT_C_EF 200
 
 // Default EF value if not specified during search.
@@ -138,10 +140,18 @@ static uint64_t VectorSetTypeNextId = 0;
 /* Our abstract data type needs a dual representation similar to Redis
  * sorted set: the proximity graph, and also a element -> graph-node map
  * that will allow us to perform deletions and other operations that have
- * as input the element itself. */
+ * as input the element itself.
+ * 我们的抽象数据类型需要一个类似于 Redis 有序集合的双重表示：
+ *  一个是邻近图（proximity graph），
+ *  另一个是元素到图节点的映射（element -> graph-node map），
+ *  这样我们才能支持以元素为输入的删除等操作。
+ */
 struct vsetObject {
+    // 指向HNSW图的指针，用于近似最近邻（ANN）搜索的核心数据结构，即“邻近图”。
     HNSW *hnsw;                 // Proximity graph.
+    // Redis 字典，用于将元素名映射到图中的节点。支持通过元素名（而不是向量值）直接进行查找、删除等操作。
     RedisModuleDict *dict;      // Element -> node mapping.
+    // 投影矩阵的指针，如果为 NULL，则不启用随机投影。
     float *proj_matrix;         // Random projection matrix, NULL if no projection
     uint32_t proj_input_size;     // Input dimension after projection.
                                   // Output dimension is implicit in
