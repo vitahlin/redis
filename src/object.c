@@ -70,7 +70,6 @@ kvobj *kvobjCreate(int type, const sds key, void *ptr, long long expire) {
      * 如果额外空间允许的话，预先分配一个用于过期时间（expiration）的字段 */
     if ((!has_expire) && (bufsize >= min_size + sizeof(long long))) {
         has_expire = 1;
-        // todo:vitah 多余的计算
         min_size += sizeof(long long);
     }
     o->expirable = has_expire;
@@ -181,7 +180,7 @@ static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
      * don't need it now. Then we don't need to realloc if it's needed later. */
     if (!o->expirable && bufsize >= min_size + sizeof(long long)) {
         o->expirable = 1;
-        // todo:vitah 多余的计算
+        // 多余的计算，编译器实际会优化，如果后续会使用min_size的话让它保持正确的值
         min_size += sizeof(long long);
     }
 
@@ -239,9 +238,6 @@ robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
     return o;
 }
 
-/**
- * todo:vitah 是不是可以先判断是不是kvobj类型，如果不是直接返回
- */
 sds kvobjGetKey(const kvobj *kv) {
     // kv + 1 是指针运算，表示跳过整个 kvobj（即 redisObject 结构体）的大小，指向其后面的附加数据。
     // kvobj 是一个结构体对象，这个操作实际上就是“跳到结构体后面的附加区域”。
@@ -269,7 +265,6 @@ sds kvobjGetKey(const kvobj *kv) {
  * 从一个 kvobj 对象中获取其过期时间（expire），如果没有设置过期时间，就返回 -1。
  */
 long long kvobjGetExpire(const kvobj *kv) {
-    // todo:vitah kv->expirable true时再计算
     unsigned char *data = (void *)(kv + 1);
     if (kv->expirable) {
         return *(long long *)data;
