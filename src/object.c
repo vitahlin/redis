@@ -563,6 +563,9 @@ void freeSetObject(robj *o) {
         break;
     case OBJ_ENCODING_INTSET:
     case OBJ_ENCODING_LISTPACK:
+        /* 这个如果是listpack可以直接释放,不需要遍历.
+         * 因为 listpack 是一个连续内存结构，所有元素都打包在一块内存里。只需要一次性释放整个内存块，不需要单独释放每个元素。
+         *  listpack 来节省内存，它是一个连续的内存区域 */
         zfree(o->ptr);
         break;
     default:
