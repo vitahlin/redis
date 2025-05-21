@@ -783,6 +783,7 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
      * - It has enough room already allocated
      * - And not too large (avoid large memmove) */
     if (ln->prev != NULL && (prev = listNodeValue(ln->prev)) &&
+        // todo:vitah size_t类型可能会产生无符号下溢问题
         prev->size - prev->used > 0)
     {
         size_t len_to_copy = prev->size - prev->used;
