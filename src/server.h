@@ -1032,7 +1032,7 @@ struct RedisModuleDigest {
 #define OBJ_STATIC_REFCOUNT ((1 << OBJ_REFCOUNT_BITS) - 2) /* Object allocated in the stack. */
 #define OBJ_FIRST_SPECIAL_REFCOUNT OBJ_STATIC_REFCOUNT
 
-// 总共16字节
+// 在64 位系统上为 16 字节，在 32 位系统上通常是 12 字节
 struct redisObject {
     unsigned type: 4; // 4位
     unsigned encoding: 4; // 4位
