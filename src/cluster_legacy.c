@@ -1383,6 +1383,7 @@ int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
     /* Otherwise create a new report. */
     fr = zmalloc(sizeof(*fr));
     fr->node = sender;
+    // todo:vitah 是不是可以不需要再次计算mstime
     fr->time = mstime();
     listAddNodeTail(l,fr);
     return 1;
