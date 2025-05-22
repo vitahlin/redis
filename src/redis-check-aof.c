@@ -47,6 +47,8 @@ typedef enum {
 } input_file_type;
 
 aofManifest *aofManifestCreate(void);
+
+// todo:vitah 重复声明
 void aofManifestFree(aofManifest *am);
 aofManifest *aofLoadManifestFromFile(sds am_filepath);
 

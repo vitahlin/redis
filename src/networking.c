@@ -68,6 +68,7 @@ size_t getStringObjectSdsUsedMemory(robj *o) {
 size_t getStringObjectLen(robj *o) {
     serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
     switch(o->encoding) {
+        // todo:vitah case是不是可以整合
     case OBJ_ENCODING_RAW: return sdslen(o->ptr);
     case OBJ_ENCODING_EMBSTR: return sdslen(o->ptr);
     default: return 0; /* Just integer encoding for now. */

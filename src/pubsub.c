@@ -35,11 +35,13 @@ int clientShardSubscriptionsCount(client *c);
 /*
  * Get client's global Pub/Sub channels dict.
  */
+// todo:vitah 重复声明
 dict* getClientPubSubChannels(client *c);
 
 /*
  * Get client's shard level Pub/Sub channels dict.
  */
+// todo:vitah 重复声明
 dict* getClientPubSubShardChannels(client *c);
 
 /*

@@ -35,6 +35,8 @@
 
 void streamFreeCG(streamCG *cg);
 void streamFreeCGGeneric(void *cg);
+
+// todo:vitah 重复定义
 void streamFreeNACK(streamNACK *na);
 size_t streamReplyWithRangeFromConsumerPEL(client *c, stream *s, streamID *start, streamID *end, size_t count, streamConsumer *consumer);
 int streamParseStrictIDOrReply(client *c, robj *o, streamID *id, uint64_t missing_seq, int *seq_given);

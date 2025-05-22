@@ -7416,6 +7416,7 @@ int main(int argc, char **argv) {
             strcmp(argv[1], "-h") == 0) usage();
         if (strcmp(argv[1], "--test-memory") == 0) {
             if (argc == 3) {
+                // todo:vitah 'atoi' used to convert a string to an integer value, but function will not report conversion errors; consider using 'strtol' instead
                 memtest(atoi(argv[2]),50);
                 exit(0);
             } else {

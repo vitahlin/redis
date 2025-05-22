@@ -83,18 +83,23 @@ static inline size_t spt_min(size_t a, size_t b) {
 /*
  * For discussion on the portability of the various methods, see
  * http://lists.freebsd.org/pipermail/freebsd-stable/2008-June/043136.html
+ * 清空当前进程的环境变量
  */
 int spt_clearenv(void) {
 #ifdef HAVE_CLEARENV
-	return clearenv();
+    /** 如果宏 HAVE_CLEARENV 被定义，说明系统有原生 clearenv() 函数（比如在 Linux）。
+     * clearenv() 会清空所有环境变量。直接调用即可。*/
+    return clearenv();
 #else
-	extern char **environ;
-	static char **tmp;
+    // environ 是 C 标准库的全局变量，指向所有环境变量字符串的指针数组（char *env[]）。
+    extern char **environ;
+    static char **tmp;
 
-	if (!(tmp = malloc(sizeof *tmp)))
+    if (!(tmp = malloc(sizeof *tmp)))
 		return errno;
 
 	tmp[0]  = NULL;
+    // environ 指向这个空数组，即把环境变量列表“置空”
 	environ = tmp;
 
 	return 0;

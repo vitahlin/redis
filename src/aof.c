@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <sys/param.h>
 
+//todo:vitah 重复声明
 void freeClientArgv(client *c);
 off_t getAppendOnlyFileSize(sds filename, int *status);
 off_t getBaseAndIncrAppendOnlyFilesSize(aofManifest *am, int *status);

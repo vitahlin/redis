@@ -1013,6 +1013,7 @@ void configGetCommand(client *c) {
 /* We use the following dictionary type to store where a configuration
  * option is mentioned in the old configuration file, so it's
  * like "maxmemory" -> list of line numbers (first line is zero). */
+// todo:vitah 重复声明
 void dictListDestructor(dict *d, void *val);
 
 /* Sentinel config rewriting is implemented inside sentinel.c by
