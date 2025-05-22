@@ -1049,7 +1049,7 @@ struct redisObject {
     unsigned refcount : OBJ_REFCOUNT_BITS;
     /*----- 到这里为止再32位，4字节 -----*/
 
-    // 8字节
+    // 64位系统上，指针是8字节，32位系统上是4字节
     void *ptr;
 };
 
