@@ -107,9 +107,6 @@ void kvstoreDictSetAtLink(kvstore *kvs, int didx, void *kv, dictEntryLink *link,
 void kvstoreDictSetKey(kvstore *kvs, int didx, dictEntry* de, void *key);
 void kvstoreDictSetVal(kvstore *kvs, int didx, dictEntry *de, void *val);
 
-// todo:vitah 重复声明
-void *kvstoreDictFetchValue(kvstore *kvs, int didx, const void *key);
-
 #ifdef REDIS_TEST
 int kvstoreTest(int argc, char *argv[], int flags);
 #endif
