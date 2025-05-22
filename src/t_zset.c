@@ -49,6 +49,7 @@
  * Skiplist implementation of the low level API
  *----------------------------------------------------------------------------*/
 
+// todo:vitah 重复定义
 int zslLexValueGteMin(sds value, zlexrangespec *spec);
 int zslLexValueLteMax(sds value, zlexrangespec *spec);
 void zsetConvertAndExpand(robj *zobj, int encoding, unsigned long cap);
@@ -109,8 +110,10 @@ void zslFree(zskiplist *zsl) {
  * (both inclusive), with a powerlaw-alike distribution where higher
  * levels are less likely to be returned. */
 int zslRandomLevel(void) {
+    // threshold 表示生成更高层的概率阈值，static 表示只计算一次。
     static const int threshold = ZSKIPLIST_P*RAND_MAX;
     int level = 1;
+    /* 随机数小于阈值就提升一层,模拟“每次有 1/4 的概率加一层”，直到失败 */
     while (random() < threshold)
         level += 1;
     return (level<ZSKIPLIST_MAXLEVEL) ? level : ZSKIPLIST_MAXLEVEL;
