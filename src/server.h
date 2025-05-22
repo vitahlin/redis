@@ -1040,12 +1040,14 @@ struct redisObject {
     unsigned lru:LRU_BITS; /* LRU time (relative to global lru_clock) or
                             * LFU data (least significant 8 bits frequency
                             * and most significant 16 bits access time). */
-    // 32位，4字节
+    /*----- 到这里为止是32位，4字节 -----*/
+
     unsigned iskvobj : 1;   /* 1 if this struct serves as a kvobj base */
     unsigned expirable : 1; /* 1 if this key has expiration time attached.
                              * If set, then this object is of type kvobj */
     // 记录当前有多少个地方在使用（引用）这个 redisObject 对象，防止被提前释放或内存泄漏。
     unsigned refcount : OBJ_REFCOUNT_BITS;
+    /*----- 到这里为止再32位，4字节 -----*/
 
     // 8字节
     void *ptr;
