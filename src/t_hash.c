@@ -930,6 +930,7 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
         }
 
         if (!update) {
+            // warn:vitah 这里之前是调用两个lpAppend，被优化了，任何循环的操作都要验证是否能优化
             listpackEntry entries[2] = {
                 {.sval = (unsigned char*) field, .slen = sdslen(field)},
                 {.sval = (unsigned char*) value, .slen = sdslen(value)},
