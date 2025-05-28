@@ -1028,6 +1028,11 @@ int equalStringObjects(robj *a, robj *b) {
          * long is the same. */
         return a->ptr == b->ptr;
     } else {
+        if (sdsEncodedObject(a) && sdsEncodedObject(b)
+            && sdslen(a->ptr) != sdslen(b->ptr))
+        {
+            return 0;
+        }
         return compareStringObjects(a,b) == 0;
     }
 }
