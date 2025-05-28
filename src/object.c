@@ -1017,9 +1017,8 @@ int collateStringObjects(const robj *a, const robj *b) {
 
 /* Equal string objects return 1 if the two objects are the same from the
  * point of view of a string comparison, otherwise 0 is returned. Note that
- * this function is faster then checking for (compareStringObject(a,b) == 0)
+ * this function is faster than checking for (compareStringObject(a,b) == 0)
  * because it can perform some more optimization.
- * todo:vitah 既然只是判断是不是相等，是不是可以优化，不需要计算排序
  */
 int equalStringObjects(robj *a, robj *b) {
     if (a->encoding == OBJ_ENCODING_INT &&
