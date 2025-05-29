@@ -2793,7 +2793,7 @@ void getRandomBytes(unsigned char *p, size_t len);
 
 // todo:vitah 重复定义
 uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l);
-void exitFromChild(int retcode);
+void exitFromChild(int retcode, int from_signal);
 long long redisPopcount(void *s, long count);
 int redisSetProcTitle(char *title);
 int validateProcTitleTemplate(const char *template);
