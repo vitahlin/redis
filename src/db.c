@@ -766,6 +766,7 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
     }
 
     for (int j = startdb; j <= enddb; j++) {
+        // todo:vitah 没数据是不是可以忽略
         removed += kvstoreSize(dbarray[j].keys);
         if (async) {
             emptyDbAsync(&dbarray[j]);
