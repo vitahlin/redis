@@ -858,14 +858,15 @@ int hashTypeGetValueObject(redisDb *db, kvobj *o, sds field, int hfeFlags,
  *                 isHashDeleted will be set to 1.
  *
  * Returns 1 if the field exists, and 0 when it doesn't.
+ * 一个 Hash 类型的键是否包含某个字段，并考虑键是否已过期（或被删除）
  */
 int hashTypeExists(redisDb *db, kvobj *o, sds field, int hfeFlags, int *isHashDeleted) {
     unsigned char *vstr = NULL;
     unsigned int vlen = UINT_MAX;
     long long vll = LLONG_MAX;
 
-    GetFieldRes res = hashTypeGetValue(db, o, field, &vstr, &vlen, &vll, 
-                                             hfeFlags, NULL);
+    GetFieldRes res = hashTypeGetValue(db, o, field, &vstr, &vlen, &vll,
+                                       hfeFlags, NULL);
     if (isHashDeleted)
         *isHashDeleted = (res == GETF_EXPIRED_HASH) ? 1 : 0;
     return (res == GETF_OK) ? 1 : 0;
@@ -2426,6 +2427,7 @@ void hsetexCommand(client *c) {
         if (flags & (HFE_EX | HFE_PX | HFE_EXAT | HFE_PXAT | HFE_KEEPTTL))
             opt |= HASH_SET_KEEP_TTL;
 
+        // todo:vitah 是不是可以直接合并设置值和过期时间
         hashTypeSet(c->db, o, field, value, opt);
 
         /* Update the expiration time. */
@@ -2478,6 +2480,7 @@ out:
                            oldlen, newlen);
 }
 
+// 对哈希表中存储的整数值字段进行增量操作
 void hincrbyCommand(client *c) {
     long long value, incr, oldvalue;
     kvobj *o;
@@ -2485,6 +2488,7 @@ void hincrbyCommand(client *c) {
     unsigned char *vstr;
     unsigned int vlen;
 
+    // 判断参数是不是合法的数字
     if (getLongLongFromObjectOrReply(c,c->argv[3],&incr,NULL) != C_OK) return;
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
 
