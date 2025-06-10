@@ -2115,6 +2115,7 @@ ebuckets *hashTypeGetDictMetaHFE(dict *d) {
  * Hash type commands
  *----------------------------------------------------------------------------*/
 
+// hsetnx 只有在字段不存在时，才设置字段的值
 void hsetnxCommand(client *c) {
     unsigned long hlen;
     int isHashDeleted;
@@ -2173,6 +2174,7 @@ void hsetCommand(client *c) {
     notifyKeyspaceEvent(NOTIFY_HASH,"hset",c->argv[1],c->db->id);
 
     // 表示自上次持久化（RDB 或 AOF）以来，对数据库做了多少次修改操作。
+    // todo:vitah 如果传输一样的值，dirty的计数会不正确
     server.dirty += (c->argc - 2)/2;
 }
 

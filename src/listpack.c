@@ -815,16 +815,21 @@ int lpGetIntegerValue(unsigned char *p, long long *lval) {
  * 'cmp' is a comparator callback. If it returns zero, current entry pointer
  * will be returned. 'user' is passed to this callback.
  * Skip 'skip' entries between every comparison.
- * Returns NULL when the field could not be found. */
+ * Returns NULL when the field could not be found.
+ * lp listpack头指针
+ * p 当前遍历的位置
+ * user 查找参数-即查找的目标字符串
+ * cmp 比较函数指针
+ * skip 跳过多少个元素后再比较 */
 static inline unsigned char *lpFindCbInternal(unsigned char *lp, unsigned char *p,
-                                              void *user, lpCmp cmp, unsigned int skip)
-{
-    int skipcnt = 0;
+                                              void *user, lpCmp cmp, unsigned int skip) {
+    int skipcnt = 0; // 当前还有几个元素要跳过
     unsigned char *value;
     int64_t ll;
     uint64_t entry_size = 123456789; /* initialized to avoid warning. */
     uint32_t lp_bytes = lpBytes(lp);
 
+    // 如果没提供起始位置，从 listpack 的第一个元素开始
     if (!p)
         p = lpFirst(lp);
 
@@ -914,10 +919,16 @@ static inline int lpFindCmp(const unsigned char *lp, unsigned char *p,
 }
 
 /* Find pointer to the entry equal to the specified entry. Skip 'skip' entries
- * between every comparison. Returns NULL when the field could not be found. */
+ * between every comparison. Returns NULL when the field could not be found.
+ * lp listpack的起始位置
+ * p 要从哪个位置开始查找
+ * s 要查找的内容
+ * slen 查找的内容长度
+ * skip 每跳过skip个元素再比较一次 */
 unsigned char *lpFind(unsigned char *lp, unsigned char *p, unsigned char *s,
                       uint32_t slen, unsigned int skip)
 {
+    // C99 标准引入的一种结构体初始化语法，称为指定初始化器（designated initializer）
     struct lpFindArg arg = {
         .s = s,
         .slen = slen
