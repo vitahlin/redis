@@ -38,12 +38,12 @@
  *    | robj (16) | expiry (8) | key-hdr-size (1) | sdshdr5 "mykey" \0 (7) | 
  *    +-----------+------------+------------------+------------------------+
  */
-kvobj *kvobjCreate(int type, const sds key, void *ptr, long long expire) {
+kvobj *kvobjCreate(int type, const sds key, void *ptr, int hasExpire) {
     /* Determine embedded key and expiration flags */
     serverAssert(key != NULL);
-
+	
     // KEY_SIZE_TO_INCLUDE_EXPIRE_THRESHOLD，是如果字符串本身就特别大，直接预留一个过期键的空间
-    int has_expire = ((expire != -1) || (sdslen(key) >= KEY_SIZE_TO_INCLUDE_EXPIRE_THRESHOLD));
+    hasExpire = hasExpire || (sdslen(key) >= KEY_SIZE_TO_INCLUDE_EXPIRE_THRESHOLD);
     
     /* Calculate embedded key size */
     size_t key_sds_len = sdslen(key);
@@ -52,7 +52,7 @@ kvobj *kvobjCreate(int type, const sds key, void *ptr, long long expire) {
 
     /* Compute the base object size */
     size_t min_size = sizeof(robj);
-    if (has_expire) min_size += sizeof(long long);
+    if (hasExpire) min_size += sizeof(long long);
     min_size += 1 + key_sds_size; /* 1 byte for SDS header size */
 
     /* Allocate object memory */
@@ -66,20 +66,19 @@ kvobj *kvobjCreate(int type, const sds key, void *ptr, long long expire) {
     o->lru = 0;
     o->iskvobj = 1;
 
-    /* If extra space allows, pre-allocate anyway expiration
-     * 如果额外空间允许的话，预先分配一个用于过期时间（expiration）的字段 */
-    if ((!has_expire) && (bufsize >= min_size + sizeof(long long))) {
-        has_expire = 1;
+    /* If extra space allows, pre-allocate anyway expiration */
+    if ((!hasExpire) && (bufsize >= min_size + sizeof(long long))) {
+        hasExpire = 1;
         min_size += sizeof(long long);
     }
-    o->expirable = has_expire;
+    o->expirable = hasExpire;
 
     /* The memory after the struct where we embedded data. */
     char *data = (void *)(o + 1);
 
     /* Set the expire field. */
     if (o->expirable) {
-        *(long long *)data = expire;
+        *(long long *)data = -1;
         data += sizeof(long long);
     }
 
@@ -148,7 +147,7 @@ robj *createRawStringObject(const char *ptr, size_t len) {
  *    +-----------+------------------+------------------------+----------------------------+
  */
 static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
-                                     const sds key, long long expire)
+                                     const sds key, int hasExpire)
                                                
 {
     serverAssert(key != NULL);
@@ -163,7 +162,7 @@ static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
 
     /* Compute base object size */
     size_t min_size = sizeof(robj) + val_sds_size;
-    if (expire != -1) min_size += sizeof(long long);
+    if (hasExpire != 0) min_size += sizeof(long long);
     min_size += 1 + key_sds_size; /* 1 byte for SDS header size */
 
     /* Allocate object memory */
@@ -173,7 +172,7 @@ static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
     o->encoding = OBJ_ENCODING_EMBSTR;
     o->refcount = 1;
     o->lru = 0;
-    o->expirable = (expire != -1);
+    o->expirable = (hasExpire != 0);
     o->iskvobj = 1;
 
     /* If the allocation has enough space for an expire field, add it even if we
@@ -189,7 +188,7 @@ static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
 
     /* Set the expire field. */
     if (o->expirable) {
-        *(long long *)data = expire;
+        *(long long *)data = -1;
         data += sizeof(long long);
     }
 
@@ -277,26 +276,25 @@ long long kvobjGetExpire(const kvobj *kv) {
  * the old object's reference counter is decremented and possibly freed. Use the
  * returned object instead of 'val' after calling this function. */
 kvobj *kvobjSetExpire(kvobj *kv, long long expire) {
-    if (kv->expirable) {
-        /* Update existing expire field. */
-        unsigned char *data = (void *)(kv + 1);
-        *(long long *)data = expire;
-        return kv;
-    } else if (expire == -1) {
-        return kv;
-    } else {
-        return kvobjSet(kvobjGetKey(kv), kv, expire);
+    if (!kv->expirable) {
+        /* Nothing to do if kv not expirable and expire is -1 */
+        if (expire == -1)
+            return kv;
+        
+        /* Reallocate kvobj to add expire field. */
+        kv = kvobjSet(kvobjGetKey(kv), kv, 1 /*hasExpire*/);
     }
+
+    /* kv is expirable. Update expire field. */
+    unsigned char *data = (void *)(kv + 1);
+    *(long long *)data = expire;
+    return kv;
 }
 
 /* This functions may reallocate the value. The new allocation is returned and
  * the old object's reference counter is decremented and possibly freed. Use the
- * returned object instead of 'val' after calling this function.
- * 将一个 robj（Redis 对象）封装成 kvobj 的核心逻辑。它根据对象类型和引用情况选择是否复用或复制数据，
- * 并构造一个新的 kvobj（可能是嵌入式的、也可能是常规堆分配的）
- */
-kvobj *kvobjSet(sds key, robj *val, long long expire) {
-    // 特殊处理 EMBSTR 编码的字符串值，edis 针对短字符串（≤ 44 字节）的一种优化编码格式，数据和元数据放在一块内存中。
+ * returned object instead of 'val' after calling this function. */
+kvobj *kvobjSet(sds key, robj *val, int hasExpire) {
     if (val->type == OBJ_STRING && val->encoding == OBJ_ENCODING_EMBSTR) {
         kvobj *kv;
         size_t len = sdslen(val->ptr);
@@ -304,15 +302,14 @@ kvobj *kvobjSet(sds key, robj *val, long long expire) {
         /* Embed when the sum is up to 64 bytes. */
         size_t size = sizeof(kvobj);
         size += (key != NULL) * (sdslen(key) + 3); /* hdr size (1) + hdr (1) + nullterm (1) */
-        size += (expire != -1) * sizeof(long long);
+        size += (!!hasExpire) * sizeof(long long);
         size += 4 + len; /* embstr header (3) + nullterm (1) */
 
         // 如果总大小不超过缓存行（通常 64 字节），则用 嵌入式结构 kvobjCreateEmbedString来创建；
         if (size <= CACHE_LINE_SIZE) {
-            kv = kvobjCreateEmbedString(val->ptr, len, key, expire);
+            kv = kvobjCreateEmbedString(val->ptr, len, key, hasExpire);
         } else {
-            // 否则使用常规分配 kvobjCreate()
-            kv = kvobjCreate(OBJ_STRING, key, sdsnewlen(val->ptr, len), expire);
+            kv = kvobjCreate(OBJ_STRING, key, sdsnewlen(val->ptr, len), hasExpire);
         }
 
         kv->lru = val->lru;
@@ -340,7 +337,7 @@ kvobj *kvobjSet(sds key, robj *val, long long expire) {
          * can be duplicated, but for a module type is not always possible. */
         serverPanic("Not implemented");
     }
-    robj *new = kvobjCreate(val->type, key, valptr, expire);
+    robj *new = kvobjCreate(val->type, key, valptr, hasExpire);
     new->encoding = val->encoding;
     new->lru = val->lru;
     decrRefCount(val);
