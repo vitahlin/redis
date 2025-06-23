@@ -1659,3 +1659,171 @@ start_server {tags {"repl external:skip"}} {
         }
     }
 }
+
+start_server {tags {"repl external:skip"}} {
+    set master [srv 0 client]
+    set master_host [srv 0 host]
+    set master_port [srv 0 port]
+
+    start_server {} {
+        set slave [srv 0 client]
+        $slave slaveof $master_host $master_port
+
+        test "Accumulate repl_total_disconnect_time with delayed reconnection" {
+            wait_for_condition 50 100 {
+                [string match {*master_link_status:up*} [$slave info replication]]
+            } else {
+                fail "Initial replica setup failed"
+            }
+
+            # Simulate disconnect by pointing to invalid master
+            $slave slaveof $master_host 0
+            after 1000
+
+            $slave slaveof $master_host $master_port
+
+            wait_for_condition 50 100 {
+                [string match {*master_link_status:up*} [$slave info replication]]
+            } else {
+                fail "Initial replica setup failed"
+            }
+            assert {[status $slave total_disconnect_time_sec] >= 1}
+        }
+
+        test "Test the total_disconnect_time_sec incr after slaveof no one" {
+            $slave slaveof no one
+            after 1000
+            $slave slaveof $master_host $master_port
+            wait_for_condition 50 100 {
+                [lindex [$slave role] 0] eq {slave} &&
+                [string match {*master_link_status:up*} [$slave info replication]]
+            } else {
+                fail "Can't turn the instance into a replica"
+            }
+            assert {[status $slave total_disconnect_time_sec] >= 2}
+        }
+
+        test "Test correct replication disconnection time counters behavior" {
+            # Simulate disconnection
+            $slave slaveof $master_host 0
+
+            after 1000
+
+            set total_disconnect_time [status $slave total_disconnect_time_sec]
+            set link_down_since [status $slave master_link_down_since_seconds]
+
+            # Restore real master
+            $slave slaveof $master_host $master_port
+            wait_for_condition 50 100 {
+                [string match {*master_link_status:up*} [$slave info replication]]
+            } else {
+                fail "Replication did not reconnect"
+            }
+            #  total_disconnect_time and link_down_since incer
+            assert {$total_disconnect_time >= 3}
+            assert {$link_down_since > 0}
+            assert {$total_disconnect_time > $link_down_since}
+
+            #  total_disconnect_time did not change after reconnect to real master
+            set total_disconnect_time_reconnect [status $slave total_disconnect_time_sec]
+            assert {$total_disconnect_time == $total_disconnect_time_reconnect}
+
+        }
+    }
+}
+
+start_server {tags {"repl external:skip"}} {
+    set master [srv 0 client]
+    set master_host [srv 0 host]
+    set master_port [srv 0 port]
+
+    start_server {} {
+        set slave [srv 0 client]
+        $slave slaveof $master_host $master_port
+
+        # Test: Normal establishment of the master link
+        test "Test normal establishment process of the master link" {
+            wait_for_condition 50 100 {
+                [lindex [$slave role] 0] eq {slave} &&
+                [string match {*master_link_status:up*} [$slave info replication]]
+            } else {
+                fail "Can't turn the instance into a replica"
+            }
+
+            assert_equal 1 [status $slave master_current_sync_attempts]
+            assert_equal 1 [status $slave master_total_sync_attempts]
+        }
+
+        # Test: Sync attempts reset after 'slaveof no one'
+        test "Test sync attempts reset after slaveof no one" {
+            $slave slaveof no one
+            $slave slaveof $master_host $master_port
+
+            wait_for_condition 50 100 {
+                [lindex [$slave role] 0] eq {slave} &&
+                [string match {*master_link_status:up*} [$slave info replication]]
+            } else {
+                fail "Can't turn the instance into a replica"
+            }
+
+            assert_equal 1 [status $slave master_current_sync_attempts]
+            assert_equal 1 [status $slave master_total_sync_attempts]
+        }
+
+        # Test: Sync attempts reset on master reconnect
+        test "Test sync attempts reset on master reconnect" {
+            $slave client kill type master
+
+            wait_for_condition 50 100 {
+                [lindex [$slave role] 0] eq {slave} &&
+                [string match {*master_link_status:up*} [$slave info replication]]
+            } else {
+                fail "Can't turn the instance into a replica"
+            }
+
+            assert_equal 1 [status $slave master_current_sync_attempts]
+            assert_equal 2 [status $slave master_total_sync_attempts]
+        }
+
+        # Test: Sync attempts reset on master switch
+        test "Test sync attempts reset on master switch" {
+            start_server {} {
+                set new_master_host [srv 0 host]
+                set new_master_port [srv 0 port]
+                $slave slaveof $new_master_host $new_master_port
+
+                wait_for_condition 50 100 {
+                    [lindex [$slave role] 0] eq {slave} &&
+                    [string match {*master_link_status:up*} [$slave info replication]]
+                } else {
+                    fail "Can't turn the instance into a replica"
+                }
+
+                assert_equal 1 [status $slave master_current_sync_attempts]
+                assert_equal 1 [status $slave master_total_sync_attempts]
+            }
+        }
+
+        # Test: Replication current attempts counter behavior
+        test "Replication current attempts counter behavior" {
+            $slave slaveof $master_host $master_port
+
+            # Wait until replica state becomes "connected"
+            wait_for_condition 1000 50 {
+                [lindex [$slave role] 0] eq {slave} &&
+                [string match {*master_link_status:up*} [$slave info replication]]
+            } else {
+                fail "slave did not connect to master."
+            }
+
+            assert_equal 1 [status $slave master_current_sync_attempts]
+
+            # Connect to an invalid master
+            $slave slaveof $master_host 0
+            after 1000
+
+            # Expect current sync attempts to increase
+            assert {[status $slave master_current_sync_attempts] >= 2}
+        }
+    }
+}
