@@ -421,8 +421,9 @@ void touchAllWatchedKeysInDb(redisDb *emptied, redisDb *replaced_with) {
 
     if (dictSize(emptied->watched_keys) == 0) return;
 
-    dictIterator *di = dictGetSafeIterator(emptied->watched_keys);
-    while((de = dictNext(di)) != NULL) {
+    dictIterator di;
+    dictInitSafeIterator(&di, emptied->watched_keys);
+    while((de = dictNext(&di)) != NULL) {
         robj *key = dictGetKey(de);
         int exists_in_emptied = dbFind(emptied, key->ptr) != NULL;
         if (exists_in_emptied ||
@@ -456,7 +457,7 @@ void touchAllWatchedKeysInDb(redisDb *emptied, redisDb *replaced_with) {
             }
         }
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 }
 
 void watchCommand(client *c) {

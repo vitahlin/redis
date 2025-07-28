@@ -15,6 +15,7 @@
 #include "server.h"
 #include "monotonic.h"
 #include "cluster.h"
+#include "cluster_slot_stats.h"
 #include "slowlog.h"
 #include "bio.h"
 #include "latency.h"
@@ -1054,7 +1055,16 @@ void removeClientFromMemUsageBucket(client *c, int allow_eviction) {
  * returns 1 if client eviction for this client is allowed, 0 otherwise.
  */
 int updateClientMemUsageAndBucket(client *c) {
-    serverAssert(pthread_equal(pthread_self(), server.main_thread_id) && c->conn);
+    /* The unlikely case this function was called from a thread different
+     * than the main one is a module call from a spawned thread. This is safe
+     * since this call must have been made after calling
+     * RedisModule_ThreadSafeContextLock i.e the module is holding the GIL. In
+     * that special case we assert that at least the updated client's
+     * running_tid is the main thread. The true main thread is allowed to call
+     * this function on clients handled by IO-threads as it makes sure the
+     * IO-threads are paused, f.e see cleintsCron() and evictClients(). */
+    serverAssert((pthread_equal(pthread_self(), server.main_thread_id) ||
+                  c->running_tid == IOTHREAD_MAIN_THREAD_ID) && c->conn);
     int allow_eviction = clientEvictionAllowed(c);
     removeClientFromMemUsageBucket(c, allow_eviction);
 
@@ -3269,10 +3279,10 @@ void populateCommandTable(void) {
 void resetCommandTableStats(dict* commands) {
     struct redisCommand *c;
     dictEntry *de;
-    dictIterator *di;
+    dictIterator di;
 
-    di = dictGetSafeIterator(commands);
-    while((de = dictNext(di)) != NULL) {
+    dictInitSafeIterator(&di, commands);
+    while((de = dictNext(&di)) != NULL) {
         c = (struct redisCommand *) dictGetVal(de);
         c->microseconds = 0;
         c->calls = 0;
@@ -3285,7 +3295,7 @@ void resetCommandTableStats(dict* commands) {
         if (c->subcommands_dict)
             resetCommandTableStats(c->subcommands_dict);
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 }
 
 void resetErrorTableStats(void) {
@@ -3712,7 +3722,7 @@ void call(client *c, int flags) {
      * and a client which is reprocessing command again (after being unblocked).
      * Blocked clients can be blocked in different places and not always it means the call() function has been
      * called. For example this is required for avoiding double logging to monitors.*/
-    int reprocessing_command = flags & CMD_CALL_REPROCESSING;
+    int reprocessing_command = (c->flags & CLIENT_REEXECUTING_COMMAND) ? 1 : 0;
 
     /* Initialization: clear the flags that must be set by the command on
      * demand, and initialize the array for additional commands propagation. */
@@ -3739,20 +3749,12 @@ void call(client *c, int flags) {
      * re-processing and unblock the client.*/
     c->flags |= CLIENT_EXECUTING_COMMAND;
 
-    /* Setting the CLIENT_REPROCESSING_COMMAND flag so that during the actual
-     * processing of the command proc, the client is aware that it is being
-     * re-processed. */
-    if (reprocessing_command) c->flags |= CLIENT_REPROCESSING_COMMAND;
-
     monotime monotonic_start = 0;
     if (monotonicGetType() == MONOTONIC_CLOCK_HW)
         monotonic_start = getMonotonicUs();
 
     // 这个就是真正执行命令的地方
     c->cmd->proc(c);
-
-    /* Clear the CLIENT_REPROCESSING_COMMAND flag after the proc is executed. */
-    if (reprocessing_command) c->flags &= ~CLIENT_REPROCESSING_COMMAND;
 
     exitExecutionUnit();
 
@@ -3826,13 +3828,14 @@ void call(client *c, int flags) {
     if (!(c->flags & CLIENT_BLOCKED))
         freeClientOriginalArgv(c);
 
-    /* populate the per-command statistics that we show in INFO commandstats.
-     * If the client is blocked we will handle latency stats and duration when it is unblocked. */
+    /* Populate the per-command and per-slot statistics that we show in INFO commandstats and CLUSTER SLOT-STATS,
+     * respectively. If the client is blocked we will handle latency stats and duration when it is unblocked. */
     if (update_command_stats && !(c->flags & CLIENT_BLOCKED)) {
         real_cmd->calls++;
         real_cmd->microseconds += c->duration;
         if (server.latency_tracking_enabled && !(c->flags & CLIENT_BLOCKED))
             updateCommandLatencyHistogram(&(real_cmd->latency_histogram), c->duration*1000);
+        clusterSlotStatsAddCpuDuration(c, c->duration);
     }
 
     /* The duration needs to be reset after each call except for a blocked command,
@@ -3982,6 +3985,8 @@ void afterCommand(client *c) {
 
     /* Flush pending tracking invalidations. */
     trackingHandlePendingKeyInvalidations();
+
+    clusterSlotStatsAddNetworkBytesOutForUserClient(c);
 
     /* Flush other pending push messages. only when we are not in nested call.
      * So the messages are not interleaved with transaction response. */
@@ -4421,7 +4426,6 @@ int processCommand(client *c) {
         addReply(c,shared.queued);
     } else {
         int flags = CMD_CALL_FULL;
-        if (client_reprocessing_command) flags |= CMD_CALL_REPROCESSING;
         call(c,flags);
         if (listLength(server.ready_keys) && !isInsideYieldingLongCommand())
             handleClientsBlockedOnKeys();
@@ -5213,14 +5217,15 @@ void addReplyCommandSubCommands(client *c, struct redisCommand *cmd, void (*repl
     else
         addReplyArrayLen(c, dictSize(cmd->subcommands_dict));
     dictEntry *de;
-    dictIterator *di = dictGetSafeIterator(cmd->subcommands_dict);
-    while((de = dictNext(di)) != NULL) {
+    dictIterator di;
+    dictInitSafeIterator(&di, cmd->subcommands_dict);
+    while((de = dictNext(&di)) != NULL) {
         struct redisCommand *sub = (struct redisCommand *)dictGetVal(de);
         if (use_map)
             addReplyBulkCBuffer(c, sub->fullname, sdslen(sub->fullname));
         reply_function(c, sub);
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 }
 
 /* Output the representation of a Redis command. Used by the COMMAND command and COMMAND INFO. */
@@ -5374,7 +5379,7 @@ void getKeysSubcommand(client *c) {
 }
 
 void genericCommandCommand(client *c, int count_only) {
-    dictIterator *di;
+    dictIterator di;
     dictEntry *de;
     void *len = NULL;
     int count = 0;
@@ -5382,8 +5387,8 @@ void genericCommandCommand(client *c, int count_only) {
     if (!count_only)
         len = addReplyDeferredLen(c);
 
-    di = dictGetIterator(server.commands);
-    while ((de = dictNext(di)) != NULL) {
+    dictInitIterator(&di, server.commands);
+    while ((de = dictNext(&di)) != NULL) {
         struct redisCommand *cmd = dictGetVal(de);
         if (!commandVisibleForClient(c, cmd))
             continue;
@@ -5391,7 +5396,7 @@ void genericCommandCommand(client *c, int count_only) {
             addReplyCommandInfo(c, dictGetVal(de));
         count++;
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
     if (count_only)
         addReplyLongLong(c, count);
     else
@@ -5455,9 +5460,10 @@ int shouldFilterFromCommandList(struct redisCommand *cmd, commandListFilter *fil
 /* COMMAND LIST FILTERBY (MODULE <module-name>|ACLCAT <cat>|PATTERN <pattern>) */
 void commandListWithFilter(client *c, dict *commands, commandListFilter filter, int *numcmds) {
     dictEntry *de;
-    dictIterator *di = dictGetIterator(commands);
+    dictIterator di;
 
-    while ((de = dictNext(di)) != NULL) {
+    dictInitIterator(&di, commands);
+    while ((de = dictNext(&di)) != NULL) {
         struct redisCommand *cmd = dictGetVal(de);
         if (commandVisibleForClient(c, cmd) && !shouldFilterFromCommandList(cmd,&filter)) {
             addReplyBulkCBuffer(c, cmd->fullname, sdslen(cmd->fullname));
@@ -5468,15 +5474,16 @@ void commandListWithFilter(client *c, dict *commands, commandListFilter filter, 
             commandListWithFilter(c, cmd->subcommands_dict, filter, numcmds);
         }
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 }
 
 /* COMMAND LIST */
 void commandListWithoutFilter(client *c, dict *commands, int *numcmds) {
     dictEntry *de;
-    dictIterator *di = dictGetIterator(commands);
+    dictIterator di;
 
-    while ((de = dictNext(di)) != NULL) {
+    dictInitIterator(&di, commands);
+    while ((de = dictNext(&di)) != NULL) {
         struct redisCommand *cmd = dictGetVal(de);
         if (commandVisibleForClient(c, cmd)) {
             addReplyBulkCBuffer(c, cmd->fullname, sdslen(cmd->fullname));
@@ -5487,7 +5494,7 @@ void commandListWithoutFilter(client *c, dict *commands, int *numcmds) {
             commandListWithoutFilter(c, cmd->subcommands_dict, numcmds);
         }
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 }
 
 /* COMMAND LIST [FILTERBY (MODULE <module-name>|ACLCAT <cat>|PATTERN <pattern>)] */
@@ -5552,11 +5559,11 @@ void commandDocsCommand(client *c) {
     int numcmds = 0;
     if (c->argc == 2) {
         /* Reply with an array of all commands */
-        dictIterator *di;
+        dictIterator di;
         dictEntry *de;
         void *replylen = addReplyDeferredLen(c);
-        di = dictGetIterator(server.commands);
-        while ((de = dictNext(di)) != NULL) {
+        dictInitIterator(&di, server.commands);
+        while ((de = dictNext(&di)) != NULL) {
             struct redisCommand *cmd = dictGetVal(de);
             if (commandVisibleForClient(c, cmd)) {
                 addReplyBulkCBuffer(c, cmd->fullname, sdslen(cmd->fullname));
@@ -5564,7 +5571,7 @@ void commandDocsCommand(client *c) {
                 numcmds++;
             }
         }
-        dictReleaseIterator(di);
+        dictResetIterator(&di);
         setDeferredMapLen(c,replylen,numcmds);
     } else {
         /* Reply with an array of the requested commands (if we find them) */
@@ -5697,9 +5704,9 @@ const char *getSafeInfoString(const char *s, size_t len, char **tmp) {
 sds genRedisInfoStringCommandStats(sds info, dict *commands) {
     struct redisCommand *c;
     dictEntry *de;
-    dictIterator *di;
-    di = dictGetSafeIterator(commands);
-    while((de = dictNext(di)) != NULL) {
+    dictIterator di;
+    dictInitSafeIterator(&di, commands);
+    while((de = dictNext(&di)) != NULL) {
         char *tmpsafe;
         c = (struct redisCommand *) dictGetVal(de);
         if (c->calls || c->failed_calls || c->rejected_calls) {
@@ -5715,7 +5722,7 @@ sds genRedisInfoStringCommandStats(sds info, dict *commands) {
             info = genRedisInfoStringCommandStats(info, c->subcommands_dict);
         }
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 
     return info;
 }
@@ -5737,9 +5744,9 @@ sds genRedisInfoStringACLStats(sds info) {
 sds genRedisInfoStringLatencyStats(sds info, dict *commands) {
     struct redisCommand *c;
     dictEntry *de;
-    dictIterator *di;
-    di = dictGetSafeIterator(commands);
-    while((de = dictNext(di)) != NULL) {
+    dictIterator di;
+    dictInitSafeIterator(&di, commands);
+    while((de = dictNext(&di)) != NULL) {
         char *tmpsafe;
         c = (struct redisCommand *) dictGetVal(de);
         if (c->latency_histogram) {
@@ -5752,7 +5759,7 @@ sds genRedisInfoStringLatencyStats(sds info, dict *commands) {
             info = genRedisInfoStringLatencyStats(info, c->subcommands_dict);
         }
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 
     return info;
 }

@@ -8,6 +8,8 @@
  * Licensed under your choice of (a) the Redis Source Available License 2.0
  * (RSALv2); or (b) the Server Side Public License v1 (SSPLv1); or (c) the
  * GNU Affero General Public License v3 (AGPLv3).
+ *
+ * Portions of this file are available under BSD3 terms; see REDISCONTRIBUTIONS for more information.
  */
 
 #include "server.h"
@@ -373,17 +375,32 @@ int calculateKeySlot(sds key) {
 
 /* Return slot-specific dictionary for key based on key's hash slot when cluster mode is enabled, else 0.*/
 int getKeySlot(sds key) {
+    if (!server.cluster_enabled) return 0;
     /* This is performance optimization that uses pre-set slot id from the current command,
      * in order to avoid calculation of the key hash.
+     *
      * This optimization is only used when current_client flag `CLIENT_EXECUTING_COMMAND` is set.
      * It only gets set during the execution of command under `call` method. Other flows requesting
      * the key slot would fallback to calculateKeySlot.
+     *
+     * Modules and scripts executed on the primary may get replicated as multi-execs that operate on multiple slots,
+     * so we must always recompute the slot for commands coming from the primary.
      */
-    if (server.current_client && server.current_client->slot >= 0 && server.current_client->flags & CLIENT_EXECUTING_COMMAND) {
-        debugServerAssertWithInfo(server.current_client, NULL, calculateKeySlot(key)==server.current_client->slot);
+    if (server.current_client && server.current_client->slot >= 0 && server.current_client->flags & CLIENT_EXECUTING_COMMAND &&
+        !(server.current_client->flags & CLIENT_MASTER))
+    {
+        debugServerAssertWithInfo(server.current_client, NULL,
+                                  (int)keyHashSlot(key, (int)sdslen(key)) == server.current_client->slot);
         return server.current_client->slot;
     }
-    return calculateKeySlot(key);
+    int slot = keyHashSlot(key, (int)sdslen(key));
+    /* For the case of replicated commands from primary, getNodeByQuery() never gets called,
+     * and thus c->slot never gets populated. That said, if this command ends up accessing a key,
+     * we are able to backfill c->slot here, where the key's hash calculation is made. */
+    if (server.current_client && (server.current_client->flags & CLIENT_MASTER)) {
+        server.current_client->slot = slot;
+    }
+    return slot;
 }
 
 /* Return the slot of the key in the command. IO threads use this function
@@ -598,21 +615,32 @@ void setKey(client *c, redisDb *db, robj *key, robj **valref, int flags) {
 void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, dictEntryLink *plink) {
     dictEntryLink dummy = NULL, *link = plink ? plink : &dummy;
     int exists;
+    kvobj *oldval = NULL;
 
     if (flags & SETKEY_ALREADY_EXIST) {
-        exists = 1;
         debugServerAssert((*link) != NULL);
+        oldval = dictGetKV(**link);
+        exists = 1;
     } else if (flags & SETKEY_DOESNT_EXIST) {
         /* link is optional */
         exists = 0;
     } else {
         /* Add or update key */
-        exists = (lookupKeyWriteWithLink(db, key, link)) != NULL;
+        oldval = lookupKeyWriteWithLink(db, key, link);
+        exists = oldval != NULL;
     }
 
     if (exists) {
+        int oldtype = oldval->type;
+        int newtype = (*valref)->type;
+
         /* Update the value of an existing key */
         dbSetValue(db, key, valref, *link, 1, 1, flags & SETKEY_KEEPTTL);
+
+        /* Notify keyspace events for override and type change */
+        notifyKeyspaceEvent(NOTIFY_OVERWRITTEN, "overwritten", key, db->id);
+        if (oldtype != newtype)
+            notifyKeyspaceEvent(NOTIFY_TYPE_CHANGED, "type_changed", key, db->id);
     } else {
         /* Add the new key to the database */
         dbAddByLink(db, key, valref, link);
@@ -1838,21 +1866,28 @@ void renameGenericCommand(client *c, int nx) {
 
     incrRefCount(o);
     expire = kvobjGetExpire(o);
-    if (lookupKeyWrite(c->db,c->argv[2]) != NULL) {
+    kvobj *destval = lookupKeyWrite(c->db,c->argv[2]);
+    int overwritten = 0;
+    int desttype = -1;
+    if (destval != NULL) {
         if (nx) {
             decrRefCount(o);
             addReply(c,shared.czero);
             return;
         }
+
         /* Overwrite: delete the old key before creating the new one
          * with the same name. */
+        desttype = destval->type;
         dbDelete(c->db,c->argv[2]);
+        overwritten = 1;
     }
 
     /* If hash with expiration on fields then remove it from global HFE DS and
      * keep next expiration time. Otherwise, dbDelete() will remove it from the
      * global HFE DS and we will lose the expiration time. */
-    if (o->type == OBJ_HASH)
+    int srctype = o->type;
+    if (srctype == OBJ_HASH)
         minHashExpireTime = hashTypeRemoveFromExpires(&c->db->hexpires, o);
 
     dbDelete(c->db,c->argv[1]);
@@ -1868,6 +1903,11 @@ void renameGenericCommand(client *c, int nx) {
         c->argv[1],c->db->id);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"rename_to",
         c->argv[2],c->db->id);
+    if (overwritten) {
+        notifyKeyspaceEvent(NOTIFY_OVERWRITTEN, "overwritten", c->argv[2], c->db->id);
+        if (desttype != srctype)
+            notifyKeyspaceEvent(NOTIFY_TYPE_CHANGED, "type_changed", c->argv[2], c->db->id);
+    }
     server.dirty++;
     addReply(c,nx ? shared.cone : shared.ok);
 }
@@ -2023,7 +2063,8 @@ void copyCommand(client *c) {
 
     /* Return zero if the key already exists in the target DB. 
      * If REPLACE option is selected, delete newkey from targetDB. */
-    if (lookupKeyWrite(dst,newkey) != NULL) {
+    kvobj *destval = lookupKeyWrite(dst,newkey);
+    if (destval != NULL) {
         if (replace) {
             delete = 1;
         } else {
@@ -2031,6 +2072,8 @@ void copyCommand(client *c) {
             return;
         }
     }
+    int destoldtype = destval ? destval->type : -1;
+    int destnewtype = o->type;
 
     /* Duplicate object according to object's type. */
     robj *newobj;
@@ -2066,6 +2109,13 @@ void copyCommand(client *c) {
     signalModifiedKey(c,dst,c->argv[2]);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"copy_to",c->argv[2],dst->id);
 
+    /* `delete` implies the destination key was overwritten */
+    if (delete) {
+        notifyKeyspaceEvent(NOTIFY_OVERWRITTEN, "overwritten", c->argv[2], dst->id);
+        if (destoldtype != destnewtype)
+            notifyKeyspaceEvent(NOTIFY_TYPE_CHANGED, "type_changed", c->argv[2], dst->id);
+    }
+
     server.dirty++;
     addReply(c,shared.cone);
 }
@@ -2076,14 +2126,15 @@ void copyCommand(client *c) {
  * where the function is used for more info. */
 void scanDatabaseForReadyKeys(redisDb *db) {
     dictEntry *de;
-    dictIterator *di = dictGetSafeIterator(db->blocking_keys);
-    while((de = dictNext(di)) != NULL) {
+    dictIterator di;
+    dictInitSafeIterator(&di, db->blocking_keys);
+    while((de = dictNext(&di)) != NULL) {
         robj *key = dictGetKey(de);
         kvobj *kv = dbFind(db, key->ptr);
         if (kv)
             signalKeyAsReady(db, key, kv->type);
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 }
 
 /* Since we are unblocking XREADGROUP clients in the event the
@@ -2091,8 +2142,10 @@ void scanDatabaseForReadyKeys(redisDb *db) {
  * database was flushed/swapped. */
 void scanDatabaseForDeletedKeys(redisDb *emptied, redisDb *replaced_with) {
     dictEntry *de;
-    dictIterator *di = dictGetSafeIterator(emptied->blocking_keys);
-    while((de = dictNext(di)) != NULL) {
+    dictIterator di;
+
+    dictInitSafeIterator(&di, emptied->blocking_keys);
+    while((de = dictNext(&di)) != NULL) {
         robj *key = dictGetKey(de);
         int existed = 0, exists = 0;
         int original_type = -1, curr_type = -1;
@@ -2114,7 +2167,7 @@ void scanDatabaseForDeletedKeys(redisDb *emptied, redisDb *replaced_with) {
         if ((existed && !exists) || original_type != curr_type)
             signalDeletedKeyAsReady(emptied, key, original_type);
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 }
 
 /* Swap two databases at runtime so that all clients will magically see
@@ -2454,6 +2507,17 @@ int keyIsExpired(redisDb *db, sds key, kvobj *kv) {
     return now > when;
 }
 
+/* Check if user configuration allows key to be deleted due to expiary */
+int confAllowsExpireDel(void) {
+    if (server.lazyexpire_nested_arbitrary_keys)
+        return 1;
+
+    /* This configuration specifically targets nested commands, to align with RE's feature of replication between dbs.
+     * transactions (from scripts or multi-exec) containing commands like SCAN and RANDOMKEY will execute locally, but their
+     * lazy-expiration DELs may induce CROSS-SLOT on remote proxy in mode replica-of (RED-161574) */
+    return !(server.execution_nesting > 1 && server.executing_client->cmd->flags & CMD_TOUCHES_ARBITRARY_KEYS);
+}
+
 /* This function is called when we are going to perform some operation
  * in a given key, but such key may be already logically expired even if
  * it still exists in the database. The main way this function is called
@@ -2512,6 +2576,11 @@ keyStatus expireIfNeeded(redisDb *db, robj *key, kvobj *kv, int flags) {
         if (server.current_client && (server.current_client->flags & CLIENT_MASTER)) return KEY_VALID;
         if (!(flags & EXPIRE_FORCE_DELETE_EXPIRED)) return KEY_EXPIRED;
     }
+
+    /* Check if user configuration disables lazy-expire deletions in current state.
+     * This will only apply if the server doesn't mandate key deletion to operate correctly (write commands). */
+    if (!(flags & EXPIRE_FORCE_DELETE_EXPIRED) && !confAllowsExpireDel())
+        return KEY_EXPIRED;
 
     /* In some cases we're explicitly instructed to return an indication of a
      * missing key without actually deleting it, even on masters. */
