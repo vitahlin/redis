@@ -166,9 +166,9 @@ int clusterRedirectBlockedClientIfNeeded(client *c);
 void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_code);
 void migrateCloseTimedoutSockets(void);
 int patternHashSlot(char *pattern, int length);
+// todo:vitah 重复声明
 int getSlotOrReply(client *c, robj *o);
 int isValidAuxString(char *s, unsigned int length);
-
 // todo:vitah 重复声明
 void migrateCommand(client *c);
 void clusterCommand(client *c);
