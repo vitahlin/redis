@@ -878,6 +878,7 @@ void setDeferredAggregateLen(client *c, void *node, long length, char prefix) {
         return;
     }
 
+    // todo:vitah 优化性能_addReplyLongLongWithPrefix
     char lenstr[128];
     size_t lenstr_len = snprintf(lenstr, sizeof(lenstr), "%c%ld\r\n", prefix, length);
     setDeferredReply(c, node, lenstr, lenstr_len);
