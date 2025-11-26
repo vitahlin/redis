@@ -1863,6 +1863,7 @@ void freeClient(client *c) {
     pubsubUnsubscribeAllPatterns(c,0);
     unmarkClientAsPubSub(c);
     dictRelease(c->pubsub_channels);
+    //todo:vitah c->pubsub_channels=NULL
     dictRelease(c->pubsub_patterns);
     dictRelease(c->pubsubshard_channels);
 

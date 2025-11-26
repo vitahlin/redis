@@ -184,6 +184,7 @@ void scriptingInit(int setup) {
      * Initialize a list we use for lua script evictions, it shares the
      * sha with the dictionary, so free fn is not set. */
     lctx.lua_scripts = dictCreate(&shaScriptObjectDictType);
+    // todo:vitah lua脚本太多的话是不是会挂
     lctx.lua_scripts_lru_list = listCreate();
     lctx.lua_scripts_mem = 0;
 
