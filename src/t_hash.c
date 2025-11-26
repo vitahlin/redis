@@ -1407,6 +1407,7 @@ int hashTypeNext(hashTypeIterator *hi, int skipExpiredFields) {
         unsigned char *zl;
         unsigned char *fptr, *vptr;
 
+        // hash 内部的 listpack 内存地址
         zl = hi->subject->ptr;
         fptr = hi->fptr;
         vptr = hi->vptr;

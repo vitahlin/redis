@@ -1651,8 +1651,11 @@ int lpValidateNext(unsigned char *lp, unsigned char **pp, size_t lpbytes) {
         return 0;
 
     /* get the entry length and encoded backlen. */
+    // 读取 header 并返回当前 entry 的 header+内容长度（不含这个 entry 自己尾部的 backlen 字节）。
     unsigned long entrylen = lpCurrentEncodedSizeUnsafe(p);
+    // 计算：如果我们要为这个 entry 写 backlen，需要用多少字节来编码 backlen（backlen 的编码是可变长的，短的只用 1 字节，长的用 5 字节）
     unsigned long encodedBacklen = lpEncodeBacklenBytes(entrylen);
+    // 当前 entry 占用的总字节数（header + 内容 + backlen 字节数）
     entrylen += encodedBacklen;
 
     /* make sure the entry doesn't reach outside the edge of the listpack */
