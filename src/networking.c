@@ -3373,6 +3373,7 @@ static inline int isCrashing(void) {
 
 /* Concatenate a string representing the state of a client in a human
  * readable format, into the sds string 's'. */
+// todo:vitah 是否增加配置隐藏用户关键信息日志
 sds catClientInfoString(sds s, client *client) {
     char flags[17], events[3], conninfo[CONN_INFO_LEN], *p;
 
