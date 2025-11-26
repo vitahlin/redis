@@ -948,6 +948,7 @@ void sdsfreesplitres(sds *tokens, int count) {
 sds sdscatrepr(sds s, const char *p, size_t len) {
     s = sdsMakeRoomFor(s, len + 2);
     s = sdscatlen(s,"\"",1);
+    // todo:vitah 性能，批量处理可打印字符
     while(len--) {
         switch(*p) {
         case '\\':
