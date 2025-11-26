@@ -714,6 +714,7 @@ void aofDelTempIncrAofFile(void) {
     bg_unlink(aof_filepath);
     sdsfree(aof_filepath);
     sdsfree(aof_filename);
+    // todo:vitah 可以删除
     return;
 }
 
