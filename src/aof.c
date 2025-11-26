@@ -494,6 +494,7 @@ sds getLastIncrAofName(aofManifest *am) {
     }
 
     /* Or return the last one. */
+    // todo:vitah 替换listLast
     listNode *lastnode = listIndex(am->incr_aof_list, -1);
     aofInfo *ai = listNodeValue(lastnode);
     return ai->file_name;
