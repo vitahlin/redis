@@ -1925,6 +1925,7 @@ unsigned int lpRandomPairsUnique(unsigned char *lp, unsigned int count,
 
     p = lpFirst(lp);
     unsigned int picked = 0, remaining = count;
+    // todo:vitah 当处理 `tuple_len > 2` 的 listpack 时（例如 `OBJ_ENCODING_LISTPACK_EX` 编码，包含 field-value-ttl 三元组），函数没有正确跳过所有 tuple 元素
     while (picked < count && p) {
         assert((p = lpNextRandom(lp, p, &index, remaining, tuple_len)));
         key = lpGetValue(p, &klen, &klval);
