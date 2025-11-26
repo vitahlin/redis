@@ -1601,6 +1601,7 @@ static void luaMaskCountHook(lua_State *lua, lua_Debug *ar) {
     if (scriptInterrupt(rctx) == SCRIPT_KILL) {
         serverLog(LL_NOTICE,"Lua script killed by user with SCRIPT KILL.");
 
+        // todo:vitah 执行FUNCTION KILL也显示SCRIPT KILL
         /*
          * Set the hook to invoke all the time so the user
          * will not be able to catch the error with pcall and invoke
