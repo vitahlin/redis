@@ -188,6 +188,7 @@ void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask)
      * is removed. */
     if (mask & AE_WRITABLE) mask |= AE_BARRIER;
 
+    // todo:vitah 删除事件 (del event) 时不能盲目使用用户传入的 mask，必须使用“实际已经注册的 mask”。否则不同平台（kqueue / evport / epoll）会出现各种错误。
     aeApiDelEvent(eventLoop, fd, mask);
     fe->mask = fe->mask & (~mask);
     if (fd == eventLoop->maxfd && fe->mask == AE_NONE) {

@@ -1977,6 +1977,7 @@ void freeClientAsync(client *c) {
     /* Replicas that was marked as CLIENT_CLOSE_ASAP should not keep the
      * replication backlog from been trimmed. */
     if (c->flags & CLIENT_SLAVE) freeReplicaReferencedReplBuffer(c);
+    // todo:vitah check c会不会已经在队列中
     listAddNodeTail(server.clients_to_close,c);
 }
 

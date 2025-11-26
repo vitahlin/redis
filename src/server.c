@@ -3596,6 +3596,8 @@ void slowlogPushCurrentCommand(client *c, struct redisCommand *cmd, ustime_t dur
      * arguments. */
     robj **argv = c->original_argv ? c->original_argv : c->argv;
     int argc = c->original_argv ? c->original_argc : c->argc;
+
+    // todo:vitah 如果当前正在运行脚本，那么传入的 client 是一个“假客户端（fake client）, 如果这是 EVAL 或类似命令，则传入的 client 也可能是原始客户端，应当使用原始客户端来获取客户端信息。
     slowlogPushEntryIfNeeded(c,argv,argc,duration);
 }
 

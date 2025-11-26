@@ -1010,6 +1010,7 @@ void killAppendOnlyChild(void) {
 /* Called when the user switches from "appendonly yes" to "appendonly no"
  * at runtime using the CONFIG command. */
 void stopAppendOnly(void) {
+    // todo:vitah 执行MULTI,CONFIG SET appendonly yes,CONFIG SET appendonly no,EXEC会出现意料之外的行为
     serverAssert(server.aof_state != AOF_OFF);
     flushAppendOnlyFile(1);
     if (redis_fsync(server.aof_fd) == -1) {
