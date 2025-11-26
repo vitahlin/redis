@@ -1421,6 +1421,7 @@ void randomkeyCommand(client *c) {
     decrRefCount(key);
 }
 
+// todo:vitah keys命令没有pattern会遍历全部数据库
 void keysCommand(client *c) {
     dictEntry *de;
     sds pattern = c->argv[1]->ptr;
