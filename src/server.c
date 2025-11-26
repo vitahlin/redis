@@ -4209,6 +4209,7 @@ int processCommand(client *c) {
         }
 
         if (!cmd) {
+            // todo:vitah 是否可以优化
             /* Handle possible security attacks. */
             if (!strcasecmp(c->argv[0]->ptr,"host:") || !strcasecmp(c->argv[0]->ptr,"post")) {
                 securityWarningCommand(c);
