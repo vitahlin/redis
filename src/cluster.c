@@ -769,7 +769,7 @@ int verifyClusterNodeId(const char *name, int length) {
     }
     return C_OK;
 }
-
+// todo:vitah 符号.和符号:
 int isValidAuxChar(int c) {
     return isalnum(c) || (strchr("!#$%&()*+:;<>?@[]^{|}~", c) == NULL);
 }
