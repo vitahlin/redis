@@ -85,6 +85,7 @@ static int getExpireMillisecondsOrReply(client *c, robj *expire, int flags, int 
 void setGenericCommand(client *c, int flags, robj *key, robj **valref, robj *expire,
                        int unit, robj *match_value, robj *ok_reply, robj *abort_reply)
 {
+    // todo:vitah set传入过期时间是不是可以优化
     long long milliseconds = 0; /* initialized to avoid any harmless warning */
     int found = 0;
     int setkey_flags = 0;
