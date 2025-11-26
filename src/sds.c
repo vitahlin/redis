@@ -1038,6 +1038,7 @@ int hex_digit_to_int(char c) {
  * input string is empty, or NULL if the input contains unbalanced
  * quotes or closed quotes followed by non space characters
  * as in: "foo"bar or "foo'
+ * todo:vitah 是否可以优化性能
  */
 sds *sdssplitargs(const char *line, int *argc) {
     const char *p = line;
