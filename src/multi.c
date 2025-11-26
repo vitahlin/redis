@@ -88,6 +88,7 @@ void flagTransaction(client *c) {
         c->flags |= CLIENT_DIRTY_EXEC;
 }
 
+// todo:vitah MULTI里执行了不允许的命令（比如 MULTI、WATCH），应该整个事务直接被丢弃
 void multiCommand(client *c) {
     if (c->flags & CLIENT_MULTI) {
         addReplyError(c,"MULTI calls can not be nested");
