@@ -560,6 +560,7 @@ static int updateStateAfterSSLIO(tls_connection *conn, int ret_value, int update
             if (ssl_err == SSL_ERROR_ZERO_RETURN ||
                 ((ssl_err == SSL_ERROR_SYSCALL && !errno))) {
                 conn->c.state = CONN_STATE_CLOSED;
+                // todo:vitah connRead 在 peer 关闭连接时是不是应该返回 0
                 return -1;
             } else {
                 conn->c.state = CONN_STATE_ERROR;

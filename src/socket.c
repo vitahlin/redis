@@ -185,6 +185,7 @@ static int connSocketAccept(connection *conn, ConnectionCallbackFunc accept_hand
     if (conn->state != CONN_STATE_ACCEPTING) return C_ERR;
     conn->state = CONN_STATE_CONNECTED;
 
+    // todo:vitah 加1又减1
     connIncrRefs(conn);
     if (!callHandler(conn, accept_handler)) ret = C_ERR;
     connDecrRefs(conn);
