@@ -2516,6 +2516,7 @@ int processInlineBuffer(client *c, pendingCommand *pcmd) {
 
     /* Create redis objects for all arguments. */
     for (pcmd->argc = 0, j = 0; j < argc; j++) {
+        // todo:vitah inline命令可以移除argv[j]的多余的尾部free空间
         pcmd->argv[pcmd->argc] = createObject(OBJ_STRING,argv[j]);
         pcmd->argc++;
         pcmd->argv_len_sum += sdslen(argv[j]);
