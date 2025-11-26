@@ -65,6 +65,7 @@ static time_t to_timestamp = 0;
 
 int consumeNewline(char *buf) {
     if (strncmp(buf,"\r\n",2) != 0) {
+        // todo:vitah 是否可以构建一个错误的数据来报错
         ERROR("Expected \\r\\n, got: %02x%02x",buf[0],buf[1]);
         return 0;
     }
