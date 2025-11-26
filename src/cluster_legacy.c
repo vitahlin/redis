@@ -313,6 +313,7 @@ static clusterMsg *getMessageFromSendBlock(clusterMsgSendBlock *msgblock) {
  * when we lock the nodes.conf file, we create a zero-length one for the
  * sake of locking if it does not already exist), C_ERR is returned.
  * If the configuration was loaded from the file, C_OK is returned. */
+// todo:vitah check memory leak
 int clusterLoadConfig(char *filename) {
     FILE *fp = fopen(filename,"r");
     struct stat sb;
