@@ -385,6 +385,7 @@ sds sdsResize(sds s, size_t size, int would_regrow) {
     size_t newsize;
 
     if (use_realloc) {
+        // todo:vitah check
         int alloc_already_optimal = 0;
         #if defined(USE_JEMALLOC)
             /* je_nallocx returns the expected allocation size for the newlen.
