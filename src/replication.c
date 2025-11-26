@@ -2192,6 +2192,7 @@ void readSyncBulkPayload(connection *conn) {
             serverLog(LL_WARNING,"I/O error trying to sync with MASTER: %s",
                 (nread == -1) ? connGetLastError(conn) : "connection lost");
             cancelReplicationHandshake(1);
+            // todo:vitah goto error?
             return;
         }
         atomicIncr(server.stat_net_repl_input_bytes, nread);
