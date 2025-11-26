@@ -324,6 +324,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
         }
 
         if (te->when <= now) {
+            // todo:vitah 是不是应该用long long
             int retval;
 
             id = te->id;
