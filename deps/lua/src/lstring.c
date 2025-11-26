@@ -74,6 +74,7 @@ static TString *newlstr (lua_State *L, const char *str, size_t l,
 
 TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
   GCObject *o;
+  // todo:vitah MurmurHash3
   unsigned int h = cast(unsigned int, l);  /* seed */
   size_t step = 1;
   size_t l1;
