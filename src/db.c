@@ -236,6 +236,7 @@ void dbgAssertAllocSizePerSlot(redisDb *db) {
  * Even if the key expiry is master-driven, we can correctly report a key is
  * expired on replicas even if the master is lagging expiring our key via DELs
  * in the replication link. */
+// todo:vitah 脚本中执行TOUCH也更新LRU
 kvobj *lookupKey(redisDb *db, robj *key, int flags, dictEntryLink *link) {
 
     kvobj *val = dbFindByLink(db, key->ptr, link);

@@ -646,6 +646,7 @@ void decrRefCount(robj *o) {
 
 /* See dismissObject() */
 void dismissSds(sds s) {
+    // todo:vitah BGSAVE/BGAOF重写期间主动free小字符串
     dismissMemory(sdsAllocPtr(s), sdsAllocSize(s));
 }
 
