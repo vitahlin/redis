@@ -222,6 +222,7 @@ int auxShardIdSetter(clusterNode *n, void *value, int length) {
 }
 
 sds auxShardIdGetter(clusterNode *n, sds s) {
+    // todo:vitah 替换sdscatfmt
     return sdscatprintf(s, "%.40s", n->shard_id);
 }
 

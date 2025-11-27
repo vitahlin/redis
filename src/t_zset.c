@@ -2108,6 +2108,7 @@ void zremrangeGenericCommand(client *c, zrange_type rangetype) {
             oldlen = newlen + deleted;
         }
         updateKeysizesHist(c->db, getKeySlot(key->ptr), OBJ_ZSET, oldlen, newlen);
+        // todo:vitah server.dirty
     }
     server.dirty += deleted;
     addReplyLongLong(c,deleted);
