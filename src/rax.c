@@ -1071,6 +1071,7 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
              /* If this node has more than one child, or actually holds
               * a key, stop here. */
             if (h->iskey || (!h->iscompr && h->size != 1)) break;
+            // todo:vitah crash 大key超过RAX_NODE_MAX_SIZE
         }
         if (child) {
             debugf("Unlinking child %p from parent %p\n",
