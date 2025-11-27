@@ -4271,6 +4271,7 @@ int processCommand(client *c) {
                                         (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_NO_ASYNC_LOADING));
     int obey_client = mustObeyClient(c);
 
+    // todo:vitah 是否可以更早检查
     if (authRequired(c)) {
         /* AUTH and HELLO and no auth commands are valid even in
          * non-authenticated state. */

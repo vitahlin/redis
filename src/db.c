@@ -1644,6 +1644,7 @@ static int scanShouldSkipDict(dict *d, int didx) {
 void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
     int isKeysHfield = 0;
     int i, j;
+    // todo:vitah 替换类型，性能
     listNode *node;
     long count = 10;
     sds pat = NULL;
@@ -2675,6 +2676,7 @@ void propagateDeletion(redisDb *db, robj *key, int lazy) {
 
     argv[0] = lazy ? shared.unlink : shared.del;
     argv[1] = key;
+    // todo:vitah incr后又decr
     incrRefCount(argv[0]);
     incrRefCount(argv[1]);
 
