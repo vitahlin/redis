@@ -2681,6 +2681,7 @@ static int parseOptions(int argc, char **argv) {
         } else if (!strcmp(argv[i],"-p") && !lastarg) {
             config.conn_info.hostport = atoi(argv[++i]);
             if (config.conn_info.hostport < 0 || config.conn_info.hostport > 65535) {
+                // todo:vitah port=0
                 fprintf(stderr, "Invalid server port.\n");
                 exit(1);
             }
