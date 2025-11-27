@@ -640,6 +640,7 @@ void saddCommand(client *c) {
         updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_SET, size - added, size);
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_SET,"sadd",c->argv[1],c->db->id);
+        // todo:vitah bug server.dirty
     }
     server.dirty += added;
     addReplyLongLong(c,added);
