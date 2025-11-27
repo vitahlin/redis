@@ -619,6 +619,7 @@ int checkSignedBitfieldOverflow(int64_t value, int64_t incr, uint64_t bits, int 
      * only after checking 'value' range, so when we use it no overflow
      * happens. 'uint64_t' cast is there just to prevent undefined behavior on
      * overflow */
+    // todo:vitah 有符号整数减法会触发未定义行为（UB）
     int64_t maxincr = (uint64_t)max-value;
     int64_t minincr = min-value;
 
