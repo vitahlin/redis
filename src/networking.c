@@ -4540,6 +4540,7 @@ size_t getClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
 
     /* Add memory overhead of the tracking prefixes, this is an underestimation so we don't need to traverse the entire rax */
     if (c->client_tracking_prefixes)
+        // todo:vitah 计算错误，应该+sizeof(raxNode*)
         mem += c->client_tracking_prefixes->numnodes * (sizeof(raxNode) * sizeof(raxNode*));
 
     return mem;
