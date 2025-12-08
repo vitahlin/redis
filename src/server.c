@@ -3032,6 +3032,13 @@ void initServer(void) {
     prefetchCommandsBatchInit();
 }
 
+/**
+ * Redis 启动阶段用于初始化 网络监听器（TCP/TLS/Unix socket）的关键函数
+ * 1. 根据配置初始化所有监听器TCP TLS Unix socket
+ * 2. 为每个监听器创建套接字并绑定端口/地址
+ * 3. 配置TLS
+ * 4. 为每个监听器注册acceptHandler，用户接收客户端连接
+ */
 void initListeners(void) {
     /* Setup listeners from server config for TCP/TLS/Unix */
     int conn_index;
@@ -7339,6 +7346,7 @@ int redisSetProcTitle(char *title) {
     return C_OK;
 }
 
+// cpulist 设置 Redis 进程绑定到哪些 CPU 核上运行
 void redisSetCpuAffinity(const char *cpulist) {
 #ifdef USE_SETCPUAFFINITY
     setcpuaffinity(cpulist);
