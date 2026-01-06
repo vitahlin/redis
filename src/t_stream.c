@@ -700,7 +700,9 @@ typedef struct {
     int trim_strategy_arg_idx; /* Index of the count in MAXLEN/MINID, for rewriting. */
     int delete_strategy; /* DELETE_STRATEGY_* */
     int approx_trim; /* If 1 only delete whole radix tree nodes, so
-                      * the trim argument is not applied verbatim. */
+                      * the trim argument is not applied verbatim.
+                      * Note: This flag is ignored when delete_strategy is non-KEEPREF.
+                      * Individual entries may still be processed for consumer groups. */
     long long limit; /* Maximum amount of entries to trim. If 0, no limitation
                       * on the amount of trimming work is enforced. */
     /* TRIM_STRATEGY_MAXLEN options */
@@ -808,8 +810,11 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
         }
 
         /* If we cannot remove a whole element, and approx is true,
-         * stop here. */
-        if (approx) break;
+         * stop here. However, for non-KEEPREF strategies, if the node was
+         * eligible for removal but we couldn't remove it (because we need
+         * to check consumer group references), we should continue to process
+         * entries within this node. */
+        if (approx && delete_strategy == DELETE_STRATEGY_KEEPREF) break;
 
         /* Now we have to trim entries from within 'lp' */
         size_t oldsize = lpBytes(lp);
@@ -1239,6 +1244,7 @@ void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamI
     }
     si->stream = s;
     si->lp = NULL;     /* There is no current listpack right now. */
+    si->lp_last_ele = NULL;
     si->lp_ele = NULL; /* Current listpack cursor. */
     si->rev = rev;     /* Direction, if non-zero reversed, from end to start. */
     si->skip_tombstones = 1;    /* By default tombstones aren't emitted. */
@@ -1249,9 +1255,12 @@ void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamI
  * signal the iteration terminated. */
 int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields) {
     while(1) { /* Will stop when element > stop_key or end of radix tree. */
-        /* Tracks the boundary of the previous entry during reverse iteration.
-         * This ensures the iterator does not move beyond the current entry when stepping backwards. */
-        unsigned char *rev_entry_boundary = NULL;
+        /* Record the previous lp_ele position to detect data corruption
+         * that might cause the iterator to move backwards unexpectedly. */
+        if (si->lp_ele && si->lp_last_ele)
+            serverAssert(si->rev ? si->lp_ele < si->lp_last_ele : si->lp_ele > si->lp_last_ele);
+        si->lp_last_ele = si->lp_ele;
+
         /* If the current listpack is set to NULL, this is the start of the
          * iteration or the previous listpack was completely iterated.
          * Go to the next node. */
@@ -1290,7 +1299,6 @@ int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields) {
              * one. */
             int64_t lp_count = lpGetInteger(si->lp_ele);
             while(lp_count--) si->lp_ele = lpPrev(si->lp,si->lp_ele);
-            rev_entry_boundary = si->lp_ele; /* Remember entry boundary. */
             /* Seek lp-count of prev entry. */
             si->lp_ele = lpPrev(si->lp,si->lp_ele);
         }
@@ -1337,11 +1345,6 @@ int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields) {
             } else {
                 *numfields = lpGetInteger(si->lp_ele);
                 si->lp_ele = lpNext(si->lp,si->lp_ele);
-            }
-            if (si->rev) {
-                /* Verify that current position hasn't reached the next entry
-                 * boundary during reverse iteration. */
-                serverAssert(!rev_entry_boundary || si->lp_ele < rev_entry_boundary);
             }
             serverAssert(*numfields>=0);
 
