@@ -1634,6 +1634,7 @@ NULL
             addReplyError(c,"An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.");
             return;
         }
+        // 返回值毫秒转成了秒 todo:vitah 是否可以添加参数返回毫秒
         addReplyLongLong(c, estimateObjectIdleTime(kv) / 1000);
     } else if (!strcasecmp(c->argv[1]->ptr,"freq") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))

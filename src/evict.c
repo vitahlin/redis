@@ -72,13 +72,26 @@ unsigned int LRU_CLOCK(void) {
 
 /* Given an object returns the min number of milliseconds the object was never
  * requested, using an approximated LRU algorithm. */
+/**
+ * 用于计算一个key有多久没有被访问了，即空闲时间
+ * o->lru：这是存储在每个Redis对象头部的时钟快照，记录了该对象最后一次被访问的时间
+ * LRU_CLOCK()：获取 Redis 当前系统的全局时钟
+ * LRU_CLOCK_MAX：Redis LRU 时钟的最大值。由于 Redis 只用了 24 位来存储这个时间，所以最大值是 $2^{24} - 1$（约 194 天）
+ *
+ */
 unsigned long long estimateObjectIdleTime(robj *o) {
+    // 获取当前LRU时钟
     unsigned long long lruclock = LRU_CLOCK();
+
+    // 正常情况下，系统当前时间比对象上次访问的时间大，直接相减得到空闲时间
     if (lruclock >= o->lru) {
         return (lruclock - o->lru) * LRU_CLOCK_RESOLUTION;
     } else {
+        // 时钟回绕，时钟只有 24 位，当它达到 $2^{24} - 1$ 后会重新从 0 开始计数。
+        // (LRU_CLOCK_MAX - o->lru)：计算从上次访问到时钟溢出归零前，经过了多久，加上 lrulock-归零导现在经过的时间
+        // 有可能回绕多次为什么不处理？为了给数亿个 Key 节省空间，拒绝使用 64 位（8 字节）的时间戳，而只用 24 位（3 字节）。逻辑后果：它只能分辨 194 天内 的先后顺序。
         return (lruclock + (LRU_CLOCK_MAX - o->lru)) *
-                    LRU_CLOCK_RESOLUTION;
+               LRU_CLOCK_RESOLUTION;
     }
 }
 
