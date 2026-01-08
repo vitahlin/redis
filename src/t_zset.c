@@ -1926,7 +1926,7 @@ reply_to_client:
 cleanup:
     zfree(scores);
     if (added || updated) {
-        signalModifiedKey(c,c->db,key);
+        keyModified(c,c->db,key,zobj,1);
         notifyKeyspaceEvent(NOTIFY_ZSET,
             incr ? "zincr" : "zadd", key, c->db->id);
     }
@@ -1974,7 +1974,7 @@ void zremCommand(client *c) {
         }
 
         updateKeysizesHist(c->db, getKeySlot(key->ptr), OBJ_ZSET, oldlen, newlen);
-        signalModifiedKey(c,c->db,key);
+        keyModified(c, c->db, key, keyremoved ? NULL : zobj, 1);
         server.dirty += deleted;
     }
     addReplyLongLong(c,deleted);
@@ -2095,7 +2095,7 @@ void zremrangeGenericCommand(client *c, zrange_type rangetype) {
         updateSlotAllocSize(c->db, getKeySlot(key->ptr), oldsize, zsetAllocSize(zobj));
     if (deleted) {
         int64_t  oldlen, newlen;
-        signalModifiedKey(c,c->db,key);
+        keyModified(c,c->db,key,NULL,1);
         notifyKeyspaceEvent(NOTIFY_ZSET,notify_type,key,c->db->id);
         if (keyremoved) {
             notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
@@ -2973,7 +2973,7 @@ void zunionInterDiffGenericCommand(client *c, robj *dstkey, int numkeysIndex, in
         } else {
             addReply(c, shared.czero);
             if (dbDelete(c->db, dstkey)) {
-                signalModifiedKey(c, c->db, dstkey);
+                keyModified(c, c->db, dstkey, NULL, 1);
                 notifyKeyspaceEvent(NOTIFY_GENERIC, "del", dstkey, c->db->id);
                 server.dirty++;
             }
@@ -3182,7 +3182,7 @@ static void zrangeResultFinalizeStore(zrange_result_handler *handler, size_t res
     } else {
         addReply(handler->client, shared.czero);
         if (dbDelete(handler->client->db, handler->dstkey)) {
-            signalModifiedKey(handler->client, handler->client->db, handler->dstkey);
+            keyModified(handler->client, handler->client->db, handler->dstkey, NULL, 1);
             notifyKeyspaceEvent(NOTIFY_GENERIC, "del", handler->dstkey, handler->client->db->id);
             server.dirty++;
         }
@@ -4178,7 +4178,7 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
         newlen = -1; 
     }
     updateKeysizesHist(c->db, getKeySlot(key->ptr), OBJ_ZSET, oldlen, newlen);
-    signalModifiedKey(c,c->db,key);
+    keyModified(c, c->db, key, (newlen > 0) ? zobj : NULL, 1);
 
     if (c->cmd->proc == zmpopCommand) {
         /* Always replicate it as ZPOP[MIN|MAX] with COUNT option instead of ZMPOP. */

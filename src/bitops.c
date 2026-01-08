@@ -876,7 +876,7 @@ void setbitCommand(client *c) {
         byteval &= ~(1 << bit);
         byteval |= ((on & 0x1) << bit);
         ((uint8_t*)o->ptr)[byte] = byteval;
-        signalModifiedKey(c,c->db,c->argv[1]);
+        keyModified(c,c->db,c->argv[1],o,1);
         notifyKeyspaceEvent(NOTIFY_STRING,"setbit",c->argv[1],c->db->id);
         server.dirty++;
 
@@ -1448,7 +1448,7 @@ void bitopCommand(client *c) {
         notifyKeyspaceEvent(NOTIFY_STRING,"set",targetkey,c->db->id);
         server.dirty++;
     } else if (dbDelete(c->db,targetkey)) {
-        signalModifiedKey(c,c->db,targetkey);
+        keyModified(c,c->db,targetkey,NULL,1);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",targetkey,c->db->id);
         server.dirty++;
     }
@@ -1952,7 +1952,7 @@ void bitfieldGeneric(client *c, int flags) {
             updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_STRING,
                                strOldSize, strOldSize + strGrowSize);
         
-        signalModifiedKey(c,c->db,c->argv[1]);
+        keyModified(c,c->db,c->argv[1],o,1);
         notifyKeyspaceEvent(NOTIFY_STRING,"setbit",c->argv[1],c->db->id);
         server.dirty += changes;
     }
