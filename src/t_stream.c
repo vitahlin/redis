@@ -36,6 +36,7 @@
 #define STREAM_LISTPACK_MAX_SIZE (1<<30)
 
 void streamFreeCGGeneric(void *cg, void *s);
+// todo:vitah 重复定义
 void streamFreeNACK(stream *s, streamNACK *na);
 size_t streamReplyWithRangeFromConsumerPEL(client *c, stream *s, streamID *start, streamID *end, size_t count, streamCG *group, streamConsumer *consumer);
 int streamParseStrictIDOrReply(client *c, robj *o, streamID *id, uint64_t missing_seq, int *seq_given);
