@@ -1577,7 +1577,7 @@ typedef struct client {
     /* list node in clients_pending_write list */
     listNode clients_pending_write_node;
     /* list node in clients_with_pending_ref_reply list */
-    listNode *pending_ref_reply_node;
+    listNode pending_ref_reply_node;
     /* Statistics and metrics */
     size_t net_input_bytes_curr_cmd; /* Total network input bytes read for the
                                       * execution of this client's current command. */
@@ -2540,13 +2540,11 @@ struct hotkeyStats {
     struct chkTopK *net;
     mstime_t start; /* Initial time point for wall time tracking */
 
-    /* Only keys from selected slots will be tracked. If slots are not
-     * initialized - all keys are tracked. */
-    int *slots;
-    int numslots;
+    /* Only keys from selected slots will be tracked. If slots is NULL,
+     * all keys are tracked. Stored as a sorted slotRangeArray. */
+    struct slotRangeArray *slots;
 
-    /* Statistics counters. NOTE, time_* members are saved in microseconds for
-     * accuracy but displayed in milliseconds during HOTKEYS GET */
+    /* Statistics counters. */
     uint64_t time_sampled_commands_selected_slots;  /* microseconds */
     uint64_t time_all_commands_selected_slots;       /* microseconds */
     uint64_t time_all_commands_all_slots;            /* microseconds */
@@ -3952,7 +3950,9 @@ kvobj *dbUnshareStringValueByLink(redisDb *db, robj *key, kvobj *kv, dictEntryLi
 #define FLUSH_TYPE_DB    1
 #define FLUSH_TYPE_SLOTS 2
 void replySlotsFlushAndFree(client *c, struct slotRangeArray *slots);
-int flushCommandCommon(client *c, int type, int flags, struct slotRangeArray *ranges);
+int flushCommandCommon(client *c, int type, int flags);
+void unblockClientForAsyncFlush(uint64_t client_id, void *userdata);
+void blockClientForAsyncFlush(client *c);
 #define EMPTYDB_NO_FLAGS 0      /* No flags. */
 #define EMPTYDB_ASYNC (1<<0)    /* Reclaim memory in another thread. */
 #define EMPTYDB_NOFUNCTIONS (1<<1) /* Indicate not to flush the functions. */
@@ -4140,7 +4140,7 @@ int validateHexDigest(client *c, const sds digest);
 
 /* Hotkey tracking */
 hotkeyStats *hotkeyStatsCreate(int count, int duration, int sample_ratio,
-                               int *slots, int slots_count, uint64_t tracked_metrics);
+                               struct slotRangeArray *slots, uint64_t tracked_metrics);
 void hotkeyStatsRelease(hotkeyStats *hotkeys);
 void hotkeyStatsPreCurrentCmd(hotkeyStats *hotkeys, client *c);
 void hotkeyStatsUpdateCurrentCmd(hotkeyStats *hotkeys, hotkeyMetrics metrics);
@@ -4408,6 +4408,7 @@ void xlenCommand(client *c);
 void xreadCommand(client *c);
 void xgroupCommand(client *c);
 void xsetidCommand(client *c);
+void xidmprecordCommand(client *c);
 void xackCommand(client *c);
 void xackdelCommand(client *c);
 void xpendingCommand(client *c);

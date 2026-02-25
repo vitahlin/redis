@@ -241,7 +241,7 @@ client *createClient(connection *conn) {
     c->auth_callback_privdata = NULL;
     c->auth_module = NULL;
     listInitNode(&c->clients_pending_write_node, c);
-    c->pending_ref_reply_node = NULL;
+    listInitNode(&c->pending_ref_reply_node, c);
     c->mem_usage_bucket = NULL;
     c->mem_usage_bucket_node = NULL;
     c->net_input_bytes_curr_cmd = 0;
@@ -521,6 +521,15 @@ void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
         _addReplyPayloadToList(c, c->reply, s + reply_len, len - reply_len, PLAIN_REPLY);
 }
 
+/* Check if the client's pending_ref_reply_node is currently linked in the list.
+ * A node is considered linked if it has neighbors (prev/next), or if it's the
+ * only node in the list (head points to it). */
+static inline int clientIsInPendingRefReplyList(client *c) {
+    return listNextNode(&c->pending_ref_reply_node) != NULL ||
+           listPrevNode(&c->pending_ref_reply_node) != NULL ||
+           listFirst(server.clients_with_pending_ref_reply) == &c->pending_ref_reply_node;
+}
+
 /* Increment reference to object and add pointer to object and
  * pointer to string itself to current reply buffer */
 static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
@@ -551,9 +560,8 @@ static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
     }
 
     /* Track clients with pending referenced reply objects for async flushdb protection. */
-    if (c->pending_ref_reply_node == NULL) {
-        listAddNodeTail(server.clients_with_pending_ref_reply, c);
-        c->pending_ref_reply_node = listLast(server.clients_with_pending_ref_reply);
+    if (!clientIsInPendingRefReplyList(c)) {
+        listLinkNodeTail(server.clients_with_pending_ref_reply, &c->pending_ref_reply_node);
     }
 }
 
@@ -1594,7 +1602,7 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         char addr[NET_ADDR_STR_LEN] = {0};
         char laddr[NET_ADDR_STR_LEN] = {0};
         connFormatAddr(conn, addr, sizeof(addr), 1);
-        connFormatAddr(conn, laddr, sizeof(addr), 0);
+        connFormatAddr(conn, laddr, sizeof(laddr), 0);
         serverLog(LL_VERBOSE,
                   "Accepted client connection in error state: %s (addr=%s laddr=%s)",
                   connGetLastError(conn), addr, laddr);
@@ -1633,7 +1641,7 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         char addr[NET_ADDR_STR_LEN] = {0};
         char laddr[NET_ADDR_STR_LEN] = {0};
         connFormatAddr(conn, addr, sizeof(addr), 1);
-        connFormatAddr(conn, laddr, sizeof(addr), 0);
+        connFormatAddr(conn, laddr, sizeof(laddr), 0);
         serverLog(LL_WARNING,
                   "Error registering fd event for the new client connection: %s (addr=%s laddr=%s)",
                   connGetLastError(conn), addr, laddr);
@@ -1906,9 +1914,8 @@ void unlinkClient(client *c) {
  * This should only be used when we are certain that the replies no longer
  * contain any referenced robj. */
 void tryUnlinkClientFromPendingRefReply(client *c, int force) {
-    if (c->pending_ref_reply_node && (force || !clientHasPendingReplies(c))) {
-        listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_node);
-        c->pending_ref_reply_node = NULL;
+    if (clientIsInPendingRefReplyList(c) && (force || !clientHasPendingReplies(c))) {
+        listUnlinkNode(server.clients_with_pending_ref_reply, &c->pending_ref_reply_node);
     }
 }
 
