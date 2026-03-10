@@ -399,6 +399,7 @@ static void zslUpdateScore(zskiplist *zsl, zskiplistNode *node, double newscore)
     /* Fast path: if the node, after the score update, would be still exactly
      * at the same position, we can just update the score without
      * actually removing and re-inserting the element in the skiplist. */
+    // todo:vitah 如果还是在原来位置直接更新值即可
     if ((node->backward == NULL || node->backward->score < newscore) &&
         (node->level[0].forward == NULL || node->level[0].forward->score > newscore))
     {
