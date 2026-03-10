@@ -534,7 +534,6 @@ void *rdbGenericLoadStringObjectUsable(rio *rdb, int flags, size_t *lenptr, size
         case RDB_ENC_LZF:
             return rdbLoadLzfStringObject(rdb,flags,lenptr,usable);
         default:
-            // todo:vitah 某个CI报这个错误，https://github.com/redis/redis/actions/runs/19653525943/job/56285326636
             rdbReportCorruptRDB("Unknown RDB string encoding type %llu",len);
             return NULL;
         }
