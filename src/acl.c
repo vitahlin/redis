@@ -2070,6 +2070,7 @@ sds *ACLMergeSelectorArguments(sds *argv, int argc, int *merged_argc, int *inval
         char *op = argv[j];
 
         if (open_bracket_start == -1 &&
+            // todo:vitah bug OOB read on empty arg
             (op[0] == '(' && op[sdslen(op) - 1] != ')')) {
             selector = sdsdup(argv[j]);
             open_bracket_start = j;
