@@ -203,7 +203,6 @@ enum KEY_ACTION{
 
 static void linenoiseAtExit(void);
 
-// todo:vitah 重复声明
 int linenoiseHistoryAdd(const char *line, int is_sensitive);
 static void refreshLine(struct linenoiseState *l);
 static void refreshSearchResult(struct linenoiseState *ls);
