@@ -124,7 +124,7 @@ static inline void lpAssertValidEntry(unsigned char* lp, size_t lpbytes, unsigne
 int lpSafeToAdd(unsigned char* lp, size_t add) {
     // TODO:vitah 是否存在溢出可能
     size_t len = lp? lpGetTotalBytes(lp): 0;
-    if (len + add > LISTPACK_MAX_SAFETY_SIZE)
+    if (add > LISTPACK_MAX_SAFETY_SIZE || len > LISTPACK_MAX_SAFETY_SIZE - add)
         return 0;
     return 1;
 }
