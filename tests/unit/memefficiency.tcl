@@ -324,7 +324,6 @@ run_solo {defrag} {
 
         test "Active defrag big keys: $type" {
             r flushdb
-            r config set jemalloc-bg-thread no
             r config set hz 100
             r config set activedefrag no
             wait_for_defrag_stop 500 100
