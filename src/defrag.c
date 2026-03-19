@@ -160,20 +160,45 @@ void* activeDefragAllocWithoutFree(void *ptr) {
      * pointers we try to free */
     size = zmalloc_usable_size(ptr);
 
+    /* === Diagnostic Phase 1: malloc ===
+     * Slow here means one of:
+     *   (a) Arena mutex contention: bg-thread holds arena lock during purge,
+     *       main thread blocks on mallocx(MALLOCX_TCACHE_NONE).
+     *   (b) Synchronous purge: bg-thread disabled, jemalloc epoch advance
+     *       triggers madvise(MADV_DONTNEED) synchronously inside malloc. */
     monotime t1 = getMonotonicUs();
     newptr = zmalloc_no_tcache(size);
     monotime elapsed_alloc = getMonotonicUs() - t1;
-    if (elapsed_alloc > 5000) { /* single malloc took more than 5ms */
-        serverLog(LL_WARNING, "slow zmalloc_no_tcache: %lu us, size=%zu",
-                  (unsigned long)elapsed_alloc, size);
-    }
 
+    /* === Diagnostic Phase 2: first touch ===
+     * Write one byte to the new allocation BEFORE memcpy.
+     * Slow here means page fault: jemalloc previously called
+     * madvise(MADV_DONTNEED) on this virtual address, releasing the physical
+     * page back to the OS. The first write re-faults it in.
+     * If Phase 1 is slow but Phase 2 is fast → lock/purge inside malloc.
+     * If Phase 1 is fast but Phase 2 is slow → page fault from MADV_DONTNEED. */
     monotime t2 = getMonotonicUs();
+    *(volatile char *)newptr = 0;
+    monotime elapsed_touch = getMonotonicUs() - t2;
+
+    /* === Diagnostic Phase 3: memcpy ===
+     * Should be fast now because Phase 2 already faulted the page in.
+     * Still slow here would indicate multi-page allocation with only the
+     * first page pre-faulted, or OS scheduling preemption. */
+    monotime t3 = getMonotonicUs();
     memcpy(newptr, ptr, size);
-    monotime elapsed_memcpy = getMonotonicUs() - t2;
-    if (elapsed_memcpy > 5000) { /* single memcpy took more than 5ms */
-        serverLog(LL_WARNING, "slow memcpy in defrag: %lu us, size=%zu",
-                  (unsigned long)elapsed_memcpy, size);
+    monotime elapsed_memcpy = getMonotonicUs() - t3;
+
+    monotime elapsed_total = getMonotonicUs() - t1;
+    if (elapsed_total > 5000) {
+        serverLog(LL_WARNING,
+            "defrag slow alloc: total=%lu us [malloc=%lu us(lock/purge?)"
+            " touch=%lu us(pagefault?) memcpy=%lu us], size=%zu",
+            (unsigned long)elapsed_total,
+            (unsigned long)elapsed_alloc,
+            (unsigned long)elapsed_touch,
+            (unsigned long)elapsed_memcpy,
+            size);
     }
 
     server.stat_active_defrag_hits++;
