@@ -159,8 +159,23 @@ void* activeDefragAllocWithoutFree(void *ptr) {
      * make sure not to use the thread cache. so that we don't get back the same
      * pointers we try to free */
     size = zmalloc_usable_size(ptr);
+
+    monotime t1 = getMonotonicUs();
     newptr = zmalloc_no_tcache(size);
+    monotime elapsed_alloc = getMonotonicUs() - t1;
+    if (elapsed_alloc > 5000) { /* single malloc took more than 5ms */
+        serverLog(LL_WARNING, "slow zmalloc_no_tcache: %lu us, size=%zu",
+                  (unsigned long)elapsed_alloc, size);
+    }
+
+    monotime t2 = getMonotonicUs();
     memcpy(newptr, ptr, size);
+    monotime elapsed_memcpy = getMonotonicUs() - t2;
+    if (elapsed_memcpy > 5000) { /* single memcpy took more than 5ms */
+        serverLog(LL_WARNING, "slow memcpy in defrag: %lu us, size=%zu",
+                  (unsigned long)elapsed_memcpy, size);
+    }
+
     server.stat_active_defrag_hits++;
     return newptr;
 }
