@@ -1,0 +1,122 @@
+#!/usr/bin/env bpftrace
+// Redis Active Defrag Latency Probe
+//
+// Usage:
+//   sudo bpftrace -p $(pgrep -n redis-server) ./src/defrag_ebpf.bt
+//
+// Notes:
+//   1. memcpy inlined by compiler (small objects, -O2) cannot be captured by uprobe
+//   2. libc path may differ by system; verify with:
+//      find /lib /usr/lib -name "libc.so.6" 2>/dev/null
+//   3. Requires root
+//
+// Output:
+//   - Slow calls (>= 1ms) printed in real-time
+//   - Histogram printed every 10 seconds
+
+BEGIN
+{
+    printf("Redis Defrag Latency Probe\n");
+    printf("PID: %d\n", pid);
+    printf("Slow threshold: 1000 us\n");
+    printf("Histogram interval: 10s\n\n");
+}
+
+// Flag: only trace calls originating from activeDefragAllocWithoutFree
+
+uprobe:./src/redis-server:activeDefragAllocWithoutFree
+{
+    @in_defrag[tid] = 1;
+}
+
+uretprobe:./src/redis-server:activeDefragAllocWithoutFree
+{
+    // Clean up flags and stale timers to prevent leaks on abnormal paths
+    delete(@in_defrag[tid]);
+    delete(@zmalloc_start[tid]);
+    delete(@memcpy_start[tid]);
+}
+
+// zmalloc_no_tcache timing
+
+uprobe:./src/redis-server:zmalloc_no_tcache
+/ @in_defrag[tid] /
+{
+    @zmalloc_start[tid] = nsecs;
+}
+
+uretprobe:./src/redis-server:zmalloc_no_tcache
+/ @in_defrag[tid] && @zmalloc_start[tid] /
+{
+    $us = (nsecs - @zmalloc_start[tid]) / 1000;
+    @zmalloc_hist = hist($us);
+    @zmalloc_total++;
+
+    if ($us >= 1000) {
+        printf("[%s] SLOW zmalloc_no_tcache : %6llu us\n",
+               strftime("%H:%M:%S", nsecs), $us);
+        @zmalloc_slow++;
+    }
+
+    delete(@zmalloc_start[tid]);
+}
+
+// memcpy timing via libc uprobe
+// Note: compiler-inlined memcpy (small objects < 64 bytes) cannot be captured;
+// only libc memcpy calls (>= 64 bytes) are visible to uprobe
+
+uprobe:/usr/lib/x86_64-linux-gnu/libc.so.6:memcpy
+/ @in_defrag[tid] /
+{
+    @memcpy_start[tid] = nsecs;
+}
+
+uretprobe:/usr/lib/x86_64-linux-gnu/libc.so.6:memcpy
+/ @in_defrag[tid] && @memcpy_start[tid] /
+{
+    $us = (nsecs - @memcpy_start[tid]) / 1000;
+    @memcpy_hist = hist($us);
+    @memcpy_total++;
+
+    if ($us >= 1000) {
+        printf("[%s] SLOW memcpy             : %6llu us\n",
+               strftime("%H:%M:%S", nsecs), $us);
+        @memcpy_slow++;
+    }
+
+    delete(@memcpy_start[tid]);
+}
+
+// Print histogram every 10 seconds
+
+interval:s:10
+{
+    printf("\n[%s] zmalloc_no_tcache latency (us) total=%llu slow(>=1ms)=%llu\n",
+           strftime("%H:%M:%S", nsecs), @zmalloc_total, @zmalloc_slow);
+    print(@zmalloc_hist);
+
+    printf("\n[%s] memcpy latency (us) total=%llu slow(>=1ms)=%llu\n",
+           strftime("%H:%M:%S", nsecs), @memcpy_total, @memcpy_slow);
+    printf("      (inlined memcpy for small objects not captured)\n");
+    print(@memcpy_hist);
+
+    // Reset interval counters; histograms accumulate across intervals
+    // Uncomment below to reset histograms each interval too:
+    // clear(@zmalloc_hist); clear(@memcpy_hist);
+    @zmalloc_total = 0; @zmalloc_slow = 0;
+    @memcpy_total  = 0; @memcpy_slow  = 0;
+}
+
+END
+{
+    printf("\nFinal Histogram\n");
+    printf("zmalloc_no_tcache (us):\n");
+    print(@zmalloc_hist);
+    printf("\nmemcpy (us):\n");
+    print(@memcpy_hist);
+
+    clear(@in_defrag);
+    clear(@zmalloc_start);
+    clear(@memcpy_start);
+}
+
