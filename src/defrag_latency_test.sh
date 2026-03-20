@@ -23,12 +23,23 @@ check_redis() {
         exit 1
     fi
     log "Redis connected: $HOST:$PORT"
+
+    # 检查是否支持 active defrag（需要 jemalloc 编译）
+    local defrag_err
+    defrag_err=$($CLI config set activedefrag no 2>&1)
+    if echo "$defrag_err" | grep -q "ERR\|error"; then
+        err "This Redis does not support active defrag."
+        err "Please recompile with: make MALLOC=jemalloc"
+        err "Or use the default make (jemalloc is the default allocator)"
+        exit 1
+    fi
+    log "Active defrag supported: OK"
 }
 
 setup_defrag_config() {
     log "Configuring defrag..."
     $CLI config set hz 100
-    $CLI config set active-defrag-enabled no
+    $CLI config set activedefrag no
     $CLI config set active-defrag-ignore-bytes 10mb
     $CLI config set active-defrag-threshold-lower 5
     $CLI config set active-defrag-threshold-upper 100
@@ -104,11 +115,11 @@ run_test() {
     log "=== Test: $label ==="
     $CLI config set jemalloc-bg-thread $bg_thread
     $CLI latency reset
-    $CLI config set active-defrag-enabled yes
+    $CLI config set activedefrag yes
 
     local max_lat=$(monitor_latency 30 "$label")
 
-    $CLI config set active-defrag-enabled no
+    $CLI config set activedefrag no
     $CLI latency reset
 
     echo "$max_lat"
