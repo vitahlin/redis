@@ -441,7 +441,9 @@ proc spawn_server {config_file stdout stderr args} {
             "MSAN_OPTIONS=allocator_may_return_null=1" \
             "TSAN_OPTIONS=allocator_may_return_null=1,detect_deadlocks=0,suppressions=src/tsan.sup" \
         ]
-        set pid [exec /usr/bin/env {*}$env {*}$cmd >> $stdout 2>> $stderr &]
+        set strace_cmd [list strace -o /tmp/strace.$port.log -T -e trace=madvise,mmap,munmap,brk]
+        set pid [exec /usr/bin/env {*}$env {*}$strace_cmd {*}$cmd >> $stdout 2>> $stderr &]
+        #set pid [exec /usr/bin/env {*}$env {*}$cmd >> $stdout 2>> $stderr &]
     }
 
     if {$::wait_server} {
