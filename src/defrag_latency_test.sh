@@ -141,11 +141,18 @@ run_test() {
 
     $CLI config set activedefrag no
 
-    # latency history 格式每行: "<timestamp> <latency_ms>"，取所有样本的最大值
-    local max_lat sample_count
-    max_lat=$($CLI latency history active-defrag-cycle 2>/dev/null | \
-              awk '{if ($2+0 > max) max=$2+0} END{print max+0}')
-    sample_count=$($CLI latency history active-defrag-cycle 2>/dev/null | wc -l | tr -d ' ')
+    # --raw 模式下 latency history 每两行一组：第1行=timestamp，第2行=latency_ms
+    # 非 raw 模式输出带 "(integer)" 前缀，awk 解析为 0
+    local raw_history max_lat sample_count
+    raw_history=$($CLI --raw latency history active-defrag-cycle 2>/dev/null)
+
+    # 打印前5行供调试
+    log "$label latency history (first 5 lines): $(echo "$raw_history" | head -5 | tr '\n' ' ')"
+
+    # 偶数行（第2、4、6...行）是 latency 值
+    max_lat=$(echo "$raw_history" | awk 'NR%2==0 && $1+0>max {max=$1+0} END{print max+0}')
+    sample_count=$(echo "$raw_history" | wc -l | tr -d ' ')
+    sample_count=$(( sample_count / 2 ))
     max_lat=${max_lat:-0}
 
     log "$label: sample_count=${sample_count} max_latency=${max_lat}ms"
