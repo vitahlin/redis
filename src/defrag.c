@@ -163,7 +163,7 @@ void* activeDefragAllocWithoutFree(void *ptr) {
     monotime t1 = getMonotonicUs();
     newptr = zmalloc_no_tcache(size);
     monotime elapsed_alloc = getMonotonicUs() - t1;
-    if (elapsed_alloc > 1000) {
+    if (elapsed_alloc > 100) {
         /* single malloc took more than 5ms */
         serverLog(LL_WARNING, "slow zmalloc_no_tcache: %lu us, size=%zu",
                   (unsigned long)elapsed_alloc, size);
@@ -172,7 +172,7 @@ void* activeDefragAllocWithoutFree(void *ptr) {
     monotime t2 = getMonotonicUs();
     memcpy(newptr, ptr, size);
     monotime elapsed_memcpy = getMonotonicUs() - t2;
-    if (elapsed_memcpy > 1000) {
+    if (elapsed_memcpy > 100) {
         /* single memcpy took more than 5ms */
         serverLog(LL_WARNING, "slow memcpy in defrag: %lu us, size=%zu",
                   (unsigned long)elapsed_memcpy, size);
