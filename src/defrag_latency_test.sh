@@ -5,7 +5,8 @@
 
 HOST=${1:-127.0.0.1}
 PORT=${2:-6379}
-CLI="redis-cli -h $HOST -p $PORT"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLI="$SCRIPT_DIR/redis-cli -h $HOST -p $PORT"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
