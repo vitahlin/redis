@@ -88,52 +88,43 @@ create_fragmentation() {
     log "Fragmentation ratio: ${frag}"
 }
 
-monitor_latency() {
-    local duration=${1:-30}
+# 等待 defrag 完成：连续 3 秒 hits 不再增加视为完成
+wait_defrag_complete() {
+    local timeout=${1:-180}
     local label=${2:-""}
-    local max_lat=0
-    local count=0
-    local end_time=$(( $(date +%s) + duration ))
+    local prev_hits=0
+    local stable=0
+    local start
+    start=$(date +%s)
 
-    warn "Monitoring for ${duration}s [${label}]..."
+    warn "Waiting for defrag to complete [${label}] (timeout=${timeout}s)..."
 
-    # 等待 2s 让 defrag 启动，并打印原始 latency 输出用于调试
-    sleep 2
-    local raw
-    raw=$($CLI latency latest 2>/dev/null)
-    log "latency latest raw: [${raw}]"
-
-    # 打印 defrag 运行统计，确认 defrag 是否真正启动
-    local hits
-    hits=$($CLI info stats 2>/dev/null | grep active_defrag_hits | awk -F: '{print $2}' | tr -d '\r\n ')
-    log "active_defrag_hits so far: ${hits:-0}"
-
-    while [ $(date +%s) -lt $end_time ]; do
-        # latency latest 格式: <event> <timestamp> <last_ms> <max_ms>
-        local lat_line
-        lat_line=$($CLI latency latest 2>/dev/null | grep "active-defrag-cycle")
-        local lat=0
-        if [ -n "$lat_line" ]; then
-            # 取第4列 max_ms
-            lat=$(echo "$lat_line" | awk '{print $4}')
-            lat=${lat:-0}
-        fi
-
-        if [ "$lat" -gt "$max_lat" ] 2>/dev/null; then
-            max_lat=$lat
-            count=$((count + 1))
-        fi
-
-        local frag
+    while true; do
+        local hits frag
+        hits=$($CLI info stats 2>/dev/null | grep "^active_defrag_hits" | awk -F: '{print $2}' | tr -d '\r\n ')
         frag=$($CLI info memory 2>/dev/null | grep allocator_frag_ratio | awk -F: '{print $2}' | tr -d '\r\n ')
-        local defrag_hits
-        defrag_hits=$($CLI info stats 2>/dev/null | grep active_defrag_hits | awk -F: '{print $2}' | tr -d '\r\n ')
-        printf "[%s] frag=%-6s max_latency=%-6s ms defrag_hits=%-8s\n" \
-            "$(date '+%H:%M:%S')" "${frag:-?}" "$max_lat" "${defrag_hits:-0}" >&2
+        hits=${hits:-0}
+
+        printf "[%s] frag=%-6s defrag_hits=%-10s stable_secs=%d\n" \
+            "$(date '+%H:%M:%S')" "${frag:-?}" "$hits" "$stable" >&2
+
+        if [ "$hits" = "$prev_hits" ]; then
+            stable=$((stable + 1))
+            if [ $stable -ge 3 ]; then
+                log "Defrag completed. hits=$hits frag=${frag}"
+                break
+            fi
+        else
+            stable=0
+        fi
+        prev_hits=$hits
+
+        if [ $(( $(date +%s) - start )) -gt $timeout ]; then
+            warn "Timeout ${timeout}s reached"
+            break
+        fi
         sleep 1
     done
-    printf "\n" >&2
-    echo "$max_lat"
 }
 
 run_test() {
@@ -145,11 +136,21 @@ run_test() {
     $CLI latency reset
     $CLI config set activedefrag yes
 
-    local max_lat=$(monitor_latency 30 "$label")
+    # 等 defrag 自然跑完，而不是固定时间窗口
+    wait_defrag_complete 180 "$label"
 
     $CLI config set activedefrag no
-    $CLI latency reset
 
+    # latency history 格式每行: "<timestamp> <latency_ms>"，取所有样本的最大值
+    local max_lat sample_count
+    max_lat=$($CLI latency history active-defrag-cycle 2>/dev/null | \
+              awk '{if ($2+0 > max) max=$2+0} END{print max+0}')
+    sample_count=$($CLI latency history active-defrag-cycle 2>/dev/null | wc -l | tr -d ' ')
+    max_lat=${max_lat:-0}
+
+    log "$label: sample_count=${sample_count} max_latency=${max_lat}ms"
+
+    $CLI latency reset
     echo "$max_lat"
 }
 
