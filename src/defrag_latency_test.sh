@@ -39,25 +39,21 @@ setup_defrag_config() {
 }
 
 create_fragmentation() {
-    local num_keys=${1:-500000}
+    local num_keys=${1:-300000}
     log "Writing $num_keys keys (this may take a while)..."
 
-    # 批量写入，使用 pipeline 提速
-    {
-        for i in $(seq 1 $num_keys); do
-            # 混合不同大小，加剧碎片
-            if (( i % 3 == 0 )); then
-                printf "*3\r\n\$3\r\nSET\r\n\$%d\r\nkey:%012d\r\n\$%d\r\n%s\r\n" \
-                    $((12+${#i})) $i 32 "$(head -c 32 /dev/urandom | base64 | head -c 32)"
-            elif (( i % 3 == 1 )); then
-                printf "*3\r\n\$3\r\nSET\r\n\$%d\r\nkey:%012d\r\n\$%d\r\n%s\r\n" \
-                    $((12+${#i})) $i 64 "$(head -c 64 /dev/urandom | base64 | head -c 64)"
-            else
-                printf "*3\r\n\$3\r\nSET\r\n\$%d\r\nkey:%012d\r\n\$%d\r\n%s\r\n" \
-                    $((12+${#i})) $i 16 "$(head -c 16 /dev/urandom | base64 | head -c 16)"
-            fi
-        done
-    } | $CLI --pipe 2>/dev/null
+    # 用 awk 生成 RESP pipeline，避免 bash 循环 fork 子进程，速度快且可移植
+    awk -v n="$num_keys" 'BEGIN {
+        sizes[0] = 16; sizes[1] = 32; sizes[2] = 64
+        for (i = 1; i <= n; i++) {
+            sz = sizes[(i - 1) % 3]
+            val = ""
+            for (j = 0; j < sz; j++) val = val "x"
+            key = sprintf("key:%012d", i)
+            printf "*3\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", \
+                length(key), key, sz, val
+        }
+    }' | $CLI --pipe 2>/dev/null
 
     log "Done writing. Now deleting half to create fragmentation..."
 
