@@ -36,12 +36,17 @@ setup_defrag_config() {
     log "Configuring defrag..."
     $CLI config set hz 100
     $CLI config set activedefrag no
-    $CLI config set active-defrag-ignore-bytes 10mb
-    $CLI config set active-defrag-threshold-lower 5
+    # 设为 100kb，确保小数据集也能触发 defrag
+    # 默认 100mb 远超测试数据量（~7MB），会导致 defrag 永不启动
+    $CLI config set active-defrag-ignore-bytes 100kb
+    # 碎片率 > 1%（frag ratio > 1.01）即触发，确保测试可以触发
+    $CLI config set active-defrag-threshold-lower 1
     $CLI config set active-defrag-threshold-upper 100
     $CLI config set active-defrag-cycle-min 65
     $CLI config set active-defrag-cycle-max 75
-    $CLI config set latency-monitor-threshold 5
+    # 设为 1ms，捕获所有 defrag 调用样本（默认 0 表示不记录）
+    $CLI config set latency-monitor-threshold 1
+    $CLI config set latency-tracking yes
     $CLI latency reset
 }
 
@@ -87,21 +92,43 @@ monitor_latency() {
 
     warn "Monitoring for ${duration}s [${label}]..."
 
+    # 等待 2s 让 defrag 启动，并打印原始 latency 输出用于调试
+    sleep 2
+    local raw
+    raw=$($CLI latency latest 2>/dev/null)
+    log "latency latest raw: [${raw}]"
+
+    # 打印 defrag 运行统计，确认 defrag 是否真正启动
+    local hits
+    hits=$($CLI info stats 2>/dev/null | grep active_defrag_hits | awk -F: '{print $2}' | tr -d '\r\n ')
+    log "active_defrag_hits so far: ${hits:-0}"
+
     while [ $(date +%s) -lt $end_time ]; do
-        local lat=$($CLI latency latest 2>/dev/null | grep "active-defrag-cycle" | awk '{print $4}')
-        if [ -n "$lat" ] && [ "$lat" -gt 0 ] 2>/dev/null; then
-            if [ "$lat" -gt "$max_lat" ]; then
-                max_lat=$lat
-            fi
+        # latency latest 格式: <event> <timestamp> <last_ms> <max_ms>
+        local lat_line
+        lat_line=$($CLI latency latest 2>/dev/null | grep "active-defrag-cycle")
+        local lat=0
+        if [ -n "$lat_line" ]; then
+            # 取第4列 max_ms
+            lat=$(echo "$lat_line" | awk '{print $4}')
+            lat=${lat:-0}
+        fi
+
+        if [ "$lat" -gt "$max_lat" ] 2>/dev/null; then
+            max_lat=$lat
             count=$((count + 1))
         fi
 
-        local frag=$($CLI info memory | grep allocator_frag_ratio | awk -F: '{print $2}' | tr -d '\r\n ')
-        printf "[%s] frag=%-6s max_latency=%-6s ms samples=%-4d\n" "$(date '+%H:%M:%S')" "$frag" "$max_lat" "$count" >&2
+        local frag
+        frag=$($CLI info memory 2>/dev/null | grep allocator_frag_ratio | awk -F: '{print $2}' | tr -d '\r\n ')
+        local defrag_hits
+        defrag_hits=$($CLI info stats 2>/dev/null | grep active_defrag_hits | awk -F: '{print $2}' | tr -d '\r\n ')
+        printf "[%s] frag=%-6s max_latency=%-6s ms defrag_hits=%-8s\n" \
+            "$(date '+%H:%M:%S')" "${frag:-?}" "$max_lat" "${defrag_hits:-0}" >&2
         sleep 1
     done
     printf "\n" >&2
-    echo "$max_lat"   # 只有这行输出到 stdout，供 $() 捕获
+    echo "$max_lat"
 }
 
 run_test() {
