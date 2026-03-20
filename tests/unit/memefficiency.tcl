@@ -326,6 +326,7 @@ run_solo {defrag} {
             r flushdb
             r config set hz 100
             r config set activedefrag no
+            r config set jemalloc-bg-thread no
             wait_for_defrag_stop 500 100
             r config resetstat
             r config set active-defrag-max-scan-fields 1000
