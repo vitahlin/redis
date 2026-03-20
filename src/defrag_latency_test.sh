@@ -51,14 +51,16 @@ setup_defrag_config() {
 }
 
 create_fragmentation() {
-    local num_keys=${1:-300000}
-    log "Writing $num_keys keys (this may take a while)..."
+    local num_keys=${1:-2000000}
+    log "Writing $num_keys keys (16G RAM, large dataset)..."
 
-    # 用 awk 生成 RESP pipeline，避免 bash 循环 fork 子进程，速度快且可移植
+    # 混合 8 种不同大小，覆盖 jemalloc 多个 size class，加剧跨 bin 碎片
+    # 总数据量约：2M × avg 96 bytes ≈ 192MB，删一半后 ~96MB 碎片
     awk -v n="$num_keys" 'BEGIN {
-        sizes[0] = 16; sizes[1] = 32; sizes[2] = 64
+        sizes[0] = 32;  sizes[1] = 48;  sizes[2] = 64;  sizes[3] = 80
+        sizes[4] = 96;  sizes[5] = 128; sizes[6] = 160; sizes[7] = 256
         for (i = 1; i <= n; i++) {
-            sz = sizes[(i - 1) % 3]
+            sz = sizes[(i - 1) % 8]
             val = ""
             for (j = 0; j < sz; j++) val = val "x"
             key = sprintf("key:%012d", i)
@@ -69,12 +71,15 @@ create_fragmentation() {
 
     log "Done writing. Now deleting half to create fragmentation..."
 
-    # 删除奇数 key，制造碎片
+    # 删除策略：每 3 个 key 删除 2 个，保留 1 个
+    # 比"删一半"更碎片化（大量小块空洞散布在 arena 各处）
     $CLI eval "
         local deleted = 0
-        for i = 1, $num_keys, 2 do
-            redis.call('del', 'key:' .. string.format('%012d', i))
-            deleted = deleted + 1
+        for i = 1, $num_keys do
+            if i % 3 ~= 0 then
+                redis.call('del', 'key:' .. string.format('%012d', i))
+                deleted = deleted + 1
+            end
         end
         return deleted
     " 0
@@ -176,14 +181,14 @@ setup_defrag_config
 
 log "Step 1: 清空并制造碎片"
 $CLI flushall
-create_fragmentation 300000
+create_fragmentation 2000000
 
 log "Step 2: bg-thread ON 测试"
 max_with=$(run_test yes "bg-thread ON")
 
 log "Step 3: 重置碎片"
 $CLI flushall
-create_fragmentation 300000
+create_fragmentation 2000000
 
 log "Step 4: bg-thread OFF 测试"
 max_without=$(run_test no "bg-thread OFF")
