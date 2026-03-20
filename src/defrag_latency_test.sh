@@ -8,14 +8,10 @@ PORT=${2:-6379}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/redis-cli -h $HOST -p $PORT"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-log() { echo -e "${GREEN}[$(date '+%H:%M:%S')]${NC} $1"; }
-warn() { echo -e "${YELLOW}[$(date '+%H:%M:%S')]${NC} $1"; }
-err() { echo -e "${RED}[$(date '+%H:%M:%S')]${NC} $1"; }
+# 全部输出到 stderr，避免被 $() 捕获污染返回值
+log()  { printf "[%s] %s\n"       "$(date '+%H:%M:%S')" "$1" >&2; }
+warn() { printf "[%s] WARN: %s\n" "$(date '+%H:%M:%S')" "$1" >&2; }
+err()  { printf "[%s] ERR:  %s\n" "$(date '+%H:%M:%S')" "$1" >&2; }
 
 check_redis() {
     if ! $CLI ping > /dev/null 2>&1; then
@@ -78,7 +74,7 @@ create_fragmentation() {
         return deleted
     " 0
 
-    local frag=$($CLI info memory | grep mem_allocator_frag_ratio | awk -F: '{print $2}' | tr -d '\r')
+    local frag=$($CLI info memory | grep allocator_frag_ratio | awk -F: '{print $2}' | tr -d '\r\n ')
     log "Fragmentation ratio: ${frag}"
 }
 
@@ -100,12 +96,12 @@ monitor_latency() {
             count=$((count + 1))
         fi
 
-        local frag=$($CLI info memory | grep mem_allocator_frag_ratio | awk -F: '{print $2}' | tr -d '\r')
-        printf "\r  frag=%-6s  max_latency=%-6s ms  samples=%-4d" "$frag" "$max_lat" "$count"
+        local frag=$($CLI info memory | grep allocator_frag_ratio | awk -F: '{print $2}' | tr -d '\r\n ')
+        printf "[%s] frag=%-6s max_latency=%-6s ms samples=%-4d\n" "$(date '+%H:%M:%S')" "$frag" "$max_lat" "$count" >&2
         sleep 1
     done
-    echo ""
-    echo "$max_lat"
+    printf "\n" >&2
+    echo "$max_lat"   # 只有这行输出到 stdout，供 $() 捕获
 }
 
 run_test() {
@@ -129,10 +125,10 @@ print_result() {
     local max_with=$1
     local max_without=$2
 
-    echo ""
+    printf "\n" >&2
     log "========== 结果对比 =========="
-    echo "  jemalloc-bg-thread yes: max_latency = ${max_with} ms"
-    echo "  jemalloc-bg-thread no:  max_latency = ${max_without} ms"
+    printf "  jemalloc-bg-thread yes: max_latency = %s ms\n" "$max_with"
+    printf "  jemalloc-bg-thread no:  max_latency = %s ms\n" "$max_without"
 
     if [ "$max_with" -gt "$max_without" ] 2>/dev/null; then
         warn "bg-thread ON 延迟更高 → 锁竞争是主要原因"
