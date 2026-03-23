@@ -737,9 +737,10 @@ proc start_server {options {code undefined}} {
         # Attaching after startup avoids making strace a parent process, so $pid remains
         # the true redis-server PID and kill_server works correctly.
         # Log name matches the test failure message: "log:./tests/tmp/server.X.Y/stdout"
+        # Requires: echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
         if {!$port_busy && !$::valgrind && !$::stack_logging} {
             set server_dir [file tail [file dirname $stdout]]
-            catch {exec strace -p $pid -o /tmp/strace.$server_dir.log -T \
+            catch {exec sudo strace -p $pid -o /tmp/strace.$server_dir.log -T \
                 -e trace=madvise,mmap,munmap,brk &}
         }
 
