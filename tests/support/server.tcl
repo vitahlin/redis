@@ -743,12 +743,13 @@ proc start_server {options {code undefined}} {
             # strace: record duration of every madvise call
             catch {exec strace -p $pid -o /tmp/strace.$server_dir.log -T \
                 -e trace=madvise &}
-            # perf: record call graph for madvise (enter+exit to allow duration calc)
-            # --call-graph dwarf works without frame pointers (-O2 builds)
+            # perf: CPU sampling to capture call graph (cpu-clock works on all kernels,
+            # no CONFIG_FTRACE_SYSCALLS required unlike syscalls:sys_enter_madvise).
+            # madvise/purge path will appear prominently if it consumes CPU time.
             catch {exec perf record \
-                -e syscalls:sys_enter_madvise \
-                -e syscalls:sys_exit_madvise \
+                -e cpu-clock \
                 -p $pid -g --call-graph dwarf \
+                -F 999 \
                 -o /tmp/perf.$server_dir.data &}
         }
 
