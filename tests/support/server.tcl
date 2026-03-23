@@ -441,12 +441,7 @@ proc spawn_server {config_file stdout stderr args} {
             "MSAN_OPTIONS=allocator_may_return_null=1" \
             "TSAN_OPTIONS=allocator_may_return_null=1,detect_deadlocks=0,suppressions=src/tsan.sup" \
         ]
-        # Use the server directory name (e.g. server.24741.23) as the strace log suffix,
-        # matching the "log:./tests/tmp/server.24741.23/stdout" in test failure messages.
-        set server_dir [file tail [file dirname $stdout]]
-        set strace_cmd [list strace -o /tmp/strace.$server_dir.log -T -e trace=madvise,mmap,munmap,brk]
-        set pid [exec /usr/bin/env {*}$env {*}$strace_cmd {*}$cmd >> $stdout 2>> $stderr &]
-        #set pid [exec /usr/bin/env {*}$env {*}$cmd >> $stdout 2>> $stderr &]
+        set pid [exec /usr/bin/env {*}$env {*}$cmd >> $stdout 2>> $stderr &]
     }
 
     if {$::wait_server} {
@@ -737,6 +732,16 @@ proc start_server {options {code undefined}} {
 
         # check that the server actually started
         set port_busy [wait_server_started $config_file $stdout $pid]
+
+        # Attach strace to the confirmed-running redis-server to trace madvise syscalls.
+        # Attaching after startup avoids making strace a parent process, so $pid remains
+        # the true redis-server PID and kill_server works correctly.
+        # Log name matches the test failure message: "log:./tests/tmp/server.X.Y/stdout"
+        if {!$port_busy && !$::valgrind && !$::stack_logging} {
+            set server_dir [file tail [file dirname $stdout]]
+            catch {exec strace -p $pid -o /tmp/strace.$server_dir.log -T \
+                -e trace=madvise,mmap,munmap,brk &}
+        }
 
         # Sometimes we have to try a different port, even if we checked
         # for availability. Other test clients may grab the port before we
