@@ -733,15 +733,23 @@ proc start_server {options {code undefined}} {
         # check that the server actually started
         set port_busy [wait_server_started $config_file $stdout $pid]
 
-        # Attach strace to the confirmed-running redis-server to trace madvise syscalls.
-        # Attaching after startup avoids making strace a parent process, so $pid remains
-        # the true redis-server PID and kill_server works correctly.
-        # Log name matches the test failure message: "log:./tests/tmp/server.X.Y/stdout"
+        # Attach strace + perf to the confirmed-running redis-server.
+        # strace  -> madvise syscall duration (wall time per call)
+        # perf    -> madvise call stack (who triggered it)
+        # Log names match the test failure message "log:./tests/tmp/server.X.Y/stdout".
         # Requires: echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
         if {!$port_busy && !$::valgrind && !$::stack_logging} {
             set server_dir [file tail [file dirname $stdout]]
+            # strace: record duration of every madvise call
             catch {exec strace -p $pid -o /tmp/strace.$server_dir.log -T \
-                -e trace=madvise,mmap,munmap,brk &}
+                -e trace=madvise &}
+            # perf: record call graph for madvise (enter+exit to allow duration calc)
+            # --call-graph dwarf works without frame pointers (-O2 builds)
+            catch {exec perf record \
+                -e syscalls:sys_enter_madvise \
+                -e syscalls:sys_exit_madvise \
+                -p $pid -g --call-graph dwarf \
+                -o /tmp/perf.$server_dir.data &}
         }
 
         # Sometimes we have to try a different port, even if we checked
