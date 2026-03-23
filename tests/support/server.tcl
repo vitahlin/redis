@@ -740,7 +740,7 @@ proc start_server {options {code undefined}} {
         # Requires: echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
         if {!$port_busy && !$::valgrind && !$::stack_logging} {
             set server_dir [file tail [file dirname $stdout]]
-            catch {exec sudo strace -p $pid -o /tmp/strace.$server_dir.log -T \
+            catch {exec strace -p $pid -o /tmp/strace.$server_dir.log -T \
                 -e trace=madvise,mmap,munmap,brk &}
         }
 
