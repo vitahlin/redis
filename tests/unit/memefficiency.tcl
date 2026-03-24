@@ -324,6 +324,7 @@ run_solo {defrag} {
 
         test "Active defrag big keys: $type" {
             r flushdb
+            e debug purge
             r config set hz 100
             r config set jemalloc-bg-thread no
             r CONFIG SET lazyfree-lazy-eviction no

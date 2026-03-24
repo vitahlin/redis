@@ -16,23 +16,54 @@
 
 BEGIN
 {
-    printf("Redis Defrag Latency Probe\n");
+    printf("Redis activeDefragAllocWithoutFree Latency Probe\n");
     printf("PID: %d\n", pid);
     printf("Slow threshold: 1000 us\n");
     printf("Histogram interval: 10s\n\n");
+    printf("Output per slow call:\n");
+    printf("  total_us = zmalloc_us + memcpy_us + other_us\n");
+    printf("  ustack   = who called activeDefragAllocWithoutFree\n\n");
 }
 
-// Flag: only trace calls originating from activeDefragAllocWithoutFree
+// -------------------------------------------------------
+// activeDefragAllocWithoutFree: measure total duration,
+// capture caller stack, accumulate per-call zmalloc/memcpy
+// -------------------------------------------------------
 
 uprobe:./src/redis-server:activeDefragAllocWithoutFree
 {
-    @in_defrag[tid] = 1;
+    @in_defrag[tid]         = 1;
+    @defrag_start[tid]      = nsecs;
+    @defrag_caller[tid]     = ustack;   // caller chain at entry
+    @call_zmalloc_us[tid]   = 0;
+    @call_memcpy_us[tid]    = 0;
 }
 
 uretprobe:./src/redis-server:activeDefragAllocWithoutFree
 {
-    // Clean up flags and stale timers to prevent leaks on abnormal paths
+    $total_us   = (nsecs - @defrag_start[tid]) / 1000;
+    $zmalloc_us = @call_zmalloc_us[tid];
+    $memcpy_us  = @call_memcpy_us[tid];
+    $other_us   = $total_us - $zmalloc_us - $memcpy_us;
+
+    @defrag_hist = hist($total_us);
+    @defrag_total++;
+
+    if ($total_us >= 1000) {
+        printf("[%s] SLOW activeDefragAllocWithoutFree: total=%llu us  zmalloc=%llu us  memcpy=%llu us  other=%llu us\n",
+               strftime("%H:%M:%S", nsecs),
+               $total_us, $zmalloc_us, $memcpy_us, $other_us);
+        printf("  caller stack:\n");
+        print(@defrag_caller[tid]);
+        @defrag_slow++;
+    }
+
+    // Clean up all per-call state
     delete(@in_defrag[tid]);
+    delete(@defrag_start[tid]);
+    delete(@defrag_caller[tid]);
+    delete(@call_zmalloc_us[tid]);
+    delete(@call_memcpy_us[tid]);
     delete(@zmalloc_start[tid]);
     delete(@memcpy_start[tid]);
 }
@@ -51,6 +82,7 @@ uretprobe:./src/redis-server:zmalloc_no_tcache
     $us = (nsecs - @zmalloc_start[tid]) / 1000;
     @zmalloc_hist = hist($us);
     @zmalloc_total++;
+    @call_zmalloc_us[tid] += $us;   // accumulate into current defrag call
 
     if ($us >= 1000) {
         printf("[%s] SLOW zmalloc_no_tcache : %6llu us\n",
@@ -77,6 +109,7 @@ uretprobe:/usr/lib/x86_64-linux-gnu/libc.so.6:memcpy
     $us = (nsecs - @memcpy_start[tid]) / 1000;
     @memcpy_hist = hist($us);
     @memcpy_total++;
+    @call_memcpy_us[tid] += $us;    // accumulate into current defrag call
 
     if ($us >= 1000) {
         printf("[%s] SLOW memcpy             : %6llu us\n",
@@ -91,6 +124,10 @@ uretprobe:/usr/lib/x86_64-linux-gnu/libc.so.6:memcpy
 
 interval:s:10
 {
+    printf("\n[%s] activeDefragAllocWithoutFree total latency (us) total=%llu slow(>=1ms)=%llu\n",
+           strftime("%H:%M:%S", nsecs), @defrag_total, @defrag_slow);
+    print(@defrag_hist);
+
     printf("\n[%s] zmalloc_no_tcache latency (us) total=%llu slow(>=1ms)=%llu\n",
            strftime("%H:%M:%S", nsecs), @zmalloc_total, @zmalloc_slow);
     print(@zmalloc_hist);
@@ -100,9 +137,7 @@ interval:s:10
     printf("      (inlined memcpy for small objects not captured)\n");
     print(@memcpy_hist);
 
-    // Reset interval counters; histograms accumulate across intervals
-    // Uncomment below to reset histograms each interval too:
-    // clear(@zmalloc_hist); clear(@memcpy_hist);
+    @defrag_total  = 0; @defrag_slow  = 0;
     @zmalloc_total = 0; @zmalloc_slow = 0;
     @memcpy_total  = 0; @memcpy_slow  = 0;
 }
@@ -110,12 +145,18 @@ interval:s:10
 END
 {
     printf("\nFinal Histogram\n");
-    printf("zmalloc_no_tcache (us):\n");
+    printf("activeDefragAllocWithoutFree (us):\n");
+    print(@defrag_hist);
+    printf("\nzmalloc_no_tcache (us):\n");
     print(@zmalloc_hist);
     printf("\nmemcpy (us):\n");
     print(@memcpy_hist);
 
     clear(@in_defrag);
+    clear(@defrag_start);
+    clear(@defrag_caller);
+    clear(@call_zmalloc_us);
+    clear(@call_memcpy_us);
     clear(@zmalloc_start);
     clear(@memcpy_start);
 }
