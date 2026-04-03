@@ -20,6 +20,15 @@ start_server {tags {"acl external:skip"}} {
         assert_match "*NOPERM*key*" $err
     }
 
+    test {Split selector merge tolerates an empty argument (RESP bulk length 0)} {
+        # Regression: ACLMergeSelectorArguments must not index op[len-1] when len==0
+        # (unsigned wraparound), which could crash the server.
+        r ACL SETUSER merge-empty-token on nopass (+@all {} ~*)
+        $r2 auth merge-empty-token password
+        assert_equal "OK" [$r2 set writekey 1]
+        assert_equal "1" [$r2 get writekey]
+    }
+
     test {Test ACL selectors by default have no permissions} {
         r ACL SETUSER selector-default reset ()
         set user [r ACL GETUSER "selector-default"]
