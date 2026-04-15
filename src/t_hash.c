@@ -2129,6 +2129,7 @@ void hsetnxCommand(client *c) {
     if (server.memory_tracking_enabled)
         updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), kv, oldsize, kvobjAllocSize(kv));
     notifyKeyspaceEvent(NOTIFY_HASH, "hset", c->argv[1], c->db->id);
+    KSN_INVALIDATE_KVOBJ(kv);
     server.dirty++;
 }
 
@@ -2167,9 +2168,7 @@ void hsetCommand(client *c) {
     if (server.memory_tracking_enabled)
         updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), kv, oldsize, kvobjAllocSize(kv));
     notifyKeyspaceEvent(NOTIFY_HASH,"hset",c->argv[1],c->db->id);
-
-    // 表示自上次持久化（RDB 或 AOF）以来，对数据库做了多少次修改操作。
-    // todo:vitah 如果传输一样的值，dirty的计数会不正确
+    KSN_INVALIDATE_KVOBJ(kv);
     server.dirty += (c->argc - 2)/2;
 }
 
@@ -2499,6 +2498,7 @@ out:
         updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), o, oldsize, kvobjAllocSize(o));
     /* Emit keyspace notifications based on field expiry, mutation, or key deletion */
     if (fields_set || expired) {
+        newlen = (int64_t) hashTypeLength(o, 0); 
         keyModified(c, c->db, c->argv[1], o, 1);
         if (expired)
             notifyKeyspaceEvent(NOTIFY_HASH, "hexpired", c->argv[1], c->db->id);
@@ -2507,18 +2507,20 @@ out:
             if (deleted || updated)
                 notifyKeyspaceEvent(NOTIFY_HASH, deleted ? "hdel" : "hexpire", c->argv[1], c->db->id);
         }
+        
+        KSN_INVALIDATE_KVOBJ(o);
+        
+        /* Key may become empty due to lazy expiry in hashTypeGetValue()
+         * or the new expiration time is in the past.*/
+        if (newlen == 0) {
+            newlen = -1;
+            /* Del key but don't update KEYSIZES. else it will decr wrong bin in histogram */
+            dbDeleteSkipKeysizesUpdate(c->db, c->argv[1]);
+            notifyKeyspaceEvent(NOTIFY_GENERIC, "del", c->argv[1], c->db->id);
+        }
+        if (oldlen != newlen)
+            updateKeysizesHist(c->db, OBJ_HASH, oldlen, newlen);
     }
-    /* Key may become empty due to lazy expiry in hashTypeExists()
-     * or the new expiration time is in the past.*/
-    newlen = (int64_t) hashTypeLength(o, 0);
-    if (newlen == 0) {
-        newlen = -1;
-        /* Del key but don't update KEYSIZES. else it will decr wrong bin in histogram */
-        dbDeleteSkipKeysizesUpdate(c->db, c->argv[1]);
-        notifyKeyspaceEvent(NOTIFY_GENERIC, "del", c->argv[1], c->db->id);
-    }
-    if (oldlen != newlen)
-        updateKeysizesHist(c->db, OBJ_HASH, oldlen, newlen);
 }
 
 // 对哈希表中存储的整数值字段进行增量操作
@@ -2571,6 +2573,7 @@ void hincrbyCommand(client *c) {
     addReplyLongLong(c,value);
     keyModified(c,c->db,c->argv[1], o, 1);
     notifyKeyspaceEvent(NOTIFY_HASH,"hincrby",c->argv[1],c->db->id);
+    KSN_INVALIDATE_KVOBJ(o);
     server.dirty++;
 }
 
@@ -2629,6 +2632,7 @@ void hincrbyfloatCommand(client *c) {
     addReplyBulkCBuffer(c,buf,len);
     keyModified(c,c->db,c->argv[1],o,1);
     notifyKeyspaceEvent(NOTIFY_HASH,"hincrbyfloat",c->argv[1],c->db->id);
+    KSN_INVALIDATE_KVOBJ(o);
     server.dirty++;
 
     /* Always replicate HINCRBYFLOAT as an HSETEX command with the final value
@@ -2768,8 +2772,20 @@ void hgetdelCommand(client *c) {
     if (expired == 0 && deleted == 0)
         return;
 
+    int64_t newlen = (int64_t) hashTypeLength(o, 0);
+    /* del key if become empty */
+    int delete_key = (newlen == 0);
+    /* update new len for keysizes histogram */
+    int64_t hist_newlen = delete_key ? -1 : newlen;
+    if (oldlen != hist_newlen)
+        updateKeysizesHist(c->db, OBJ_HASH, oldlen, hist_newlen);
+    /* update memory tracking */
     if (server.memory_tracking_enabled)
         updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), o, oldsize, kvobjAllocSize(o));
+    /* is it last HFE */
+    if (!delete_key && hfe && (hashTypeIsFieldsWithExpire(o) == 0))
+        estoreRemove(c->db->subexpires, getKeySlot(c->argv[1]->ptr), o);
+    
     keyModified(c, c->db, c->argv[1], o, 1);
 
     if (expired)
@@ -2786,21 +2802,14 @@ void hgetdelCommand(client *c) {
         rewriteClientCommandArgument(c, 2, NULL);  /* Delete <numfields> arg */
     }
 
+    KSN_INVALIDATE_KVOBJ(o);
+
     /* Key may have become empty because of deleting fields or lazy expire. */
-    int64_t newlen = (int64_t) hashTypeLength(o, 0);
-    if (newlen == 0) {
-        newlen = -1;
+    if (delete_key) {
         /* Del key but don't update KEYSIZES. else it will decr wrong bin in histogram */
         dbDeleteSkipKeysizesUpdate(c->db, c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC, "del", c->argv[1], c->db->id);
-    } else {
-        if (hfe && (hashTypeIsFieldsWithExpire(o) == 0)) { /*is it last HFE*/
-            estoreRemove(c->db->subexpires, getKeySlot(kvobjGetKey(o)), o);
-        }
     }
-
-    if (oldlen != newlen)
-        updateKeysizesHist(c->db, OBJ_HASH, oldlen, newlen);
 }
 
 /* Get the value of one or more fields of a given hash key and optionally set 
@@ -2969,33 +2978,40 @@ void hdelCommand(client *c) {
         if (hashTypeDelete(o,c->argv[j]->ptr)) {
             deleted++;
             if (hashTypeLength(o, 0) == 0) {
-                if (server.memory_tracking_enabled)
-                    updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), o, oldsize, kvobjAllocSize(o));
-                /* del key but don't update KEYSIZES. Else it will decr wrong bin in histogram */
-                dbDeleteSkipKeysizesUpdate(c->db, c->argv[1]);
                 keyremoved = 1;
                 break;
             }
         }
     }
+    
     if (!keyremoved && o->encoding == OBJ_ENCODING_HT) {
         dictResumeAutoResize((dict*)o->ptr);
         dictShrinkIfNeeded((dict*)o->ptr);
     }
-    if (server.memory_tracking_enabled && !keyremoved)
+    if (server.memory_tracking_enabled)
         updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), o, oldsize, kvobjAllocSize(o));
     if (deleted) {
-        int64_t newLen = -1; /* The value -1 indicates that the key is deleted. */
+        /* Update keysizes histogram */
+        int64_t newLen = (int64_t) hashTypeLength(o, 0);
+        updateKeysizesHist(c->db, OBJ_HASH, oldLen, keyremoved ? -1 : newLen);
+        
+        if (keyremoved) {
+            /* del key but don't update KEYSIZES. Else it will decr wrong bin in histogram */
+            dbDeleteSkipKeysizesUpdate(c->db, c->argv[1]);
+        } else {
+            /* is it last HFE */
+            if (isHFE && (hashTypeIsFieldsWithExpire(o) == 0))
+                estoreRemove(c->db->subexpires, getKeySlot(c->argv[1]->ptr), o);
+        }
+
+        /* Signal key modification */
         keyModified(c, c->db, c->argv[1], keyremoved ? NULL : o, 1);
         notifyKeyspaceEvent(NOTIFY_HASH,"hdel",c->argv[1],c->db->id);
-        if (keyremoved) {
-            notifyKeyspaceEvent(NOTIFY_GENERIC, "del", c->argv[1], c->db->id);
-        } else {
-            if (isHFE && (hashTypeIsFieldsWithExpire(o) == 0)) /* is it last HFE */
-                estoreRemove(c->db->subexpires, getKeySlot(c->argv[1]->ptr), o);
-            newLen = oldLen - deleted;
-        }
-        updateKeysizesHist(c->db, OBJ_HASH, oldLen, newLen);
+        
+        KSN_INVALIDATE_KVOBJ(o); /* Invalidate local kvobj pointer */
+        
+        /* Notify del event if key was deleted */
+        if (keyremoved) notifyKeyspaceEvent(NOTIFY_GENERIC, "del", c->argv[1], c->db->id);
         server.dirty += deleted;
     }
     addReplyLongLong(c,deleted);
@@ -3620,14 +3636,15 @@ static int parseHashCommandArgs(client *c, HashCommandArgs *args,
                                               &numFields, "Parameter `numFields` should be greater than 0") != C_OK)
                 return C_ERR;
 
-            args->fieldCount = (int)numFields;
             args->firstFieldPos = i + 2;
 
             /* Check bounds - we must have exactly the right number of fields */
-            if (args->firstFieldPos + args->fieldCount > c->argc) {
+            if (numFields > c->argc - args->firstFieldPos) {
                 addReplyError(c, "wrong number of arguments");
                 return C_ERR;
             }
+
+            args->fieldCount = (int)numFields;
 
             /* Skip over the field arguments */
             i = args->firstFieldPos + args->fieldCount - 1;
