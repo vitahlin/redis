@@ -15,10 +15,6 @@ import io
 import traceback
 from datetime import timedelta
 from functools import partial
-try:
-    from jsonschema import Draft201909Validator as schema_validator
-except ImportError:
-    from jsonschema import Draft7Validator as schema_validator
 
 """
 The purpose of this file is to validate the reply_schema values of COMMAND DOCS.
@@ -42,6 +38,70 @@ The script will fail only if:
 Future validations:
 1. Fail the script if one or more of the branches of the reply schema (e.g. oneOf, anyOf) was not hit.
 """
+
+# ---------------------------------------------------------------------------
+# Plan 2: prefer the Rust-backed jsonschema-rs for validation (50-100x faster
+# than the pure-Python jsonschema library).  Fall back gracefully if the
+# package is not installed.
+# ---------------------------------------------------------------------------
+try:
+    import jsonschema_rs
+    _USE_RUST_VALIDATOR = True
+except ImportError:
+    _USE_RUST_VALIDATOR = False
+
+# Pure-Python fallback validator (prefer the newer Draft 2019-09 if available)
+try:
+    from jsonschema import Draft201909Validator as _FallbackValidator
+except ImportError:
+    from jsonschema import Draft7Validator as _FallbackValidator
+
+# Unified set of validation exceptions to catch regardless of backend.
+_VALIDATION_ERRORS = (jsonschema.ValidationError, jsonschema.exceptions.SchemaError)
+if _USE_RUST_VALIDATOR:
+    _VALIDATION_ERRORS = _VALIDATION_ERRORS + (jsonschema_rs.ValidationError,)
+
+# ---------------------------------------------------------------------------
+# Plan 1: pre-compiled schema cache.
+# This dict is populated once per worker process by _init_worker() so that
+# the compilation cost is paid exactly once instead of once per req-res pair.
+# ---------------------------------------------------------------------------
+_compiled_validators = None  # type: dict | None
+
+
+def compile_schema(schema):
+    """Compile *schema* into a reusable validator instance.
+
+    Uses the Rust-backed jsonschema_rs when available (Plan 2), otherwise
+    falls back to the pure-Python jsonschema library (Plan 1 still applies).
+    Handles both old (JSONSchema) and new (validator_for) jsonschema_rs APIs.
+    """
+    if _USE_RUST_VALIDATOR:
+        if hasattr(jsonschema_rs, 'validator_for'):
+            return jsonschema_rs.validator_for(schema)
+        return jsonschema_rs.JSONSchema(schema)
+    return _FallbackValidator(schema)
+
+
+def _init_worker(docs):
+    """Pool worker initializer: compile every reply schema exactly once (Plan 1).
+
+    Each worker process calls this once at startup, filling the module-level
+    ``_compiled_validators`` dict so that all subsequent process_file() calls
+    in that process can reuse the compiled validator without re-parsing schemas.
+    ``docs`` is a plain dict (picklable) sent once per worker, not once per file.
+    """
+    global _compiled_validators
+    _compiled_validators = {}
+    for cmd, doc in docs.items():
+        schema = doc.get("reply_schema")
+        if schema is not None:
+            try:
+                _compiled_validators[cmd] = compile_schema(schema)
+            except Exception:
+                # Compilation failure: process_file() will fall back to the
+                # dynamic jsonschema.validate() path for this specific command.
+                pass
 
 IGNORED_COMMANDS = {
     # Commands that don't work in a req-res manner (see logreqres.c)
@@ -235,8 +295,15 @@ def process_file(docs, path):
                 continue
 
             try:
-                jsonschema.validate(instance=res.json, schema=req.schema, cls=schema_validator)
-            except (jsonschema.ValidationError, jsonschema.exceptions.SchemaError) as err:
+                # Plan 1: look up the pre-compiled validator for this command.
+                # Falls back to dynamic validation when the pre-compiled cache
+                # is unavailable or when schema compilation failed at startup.
+                compiled = _compiled_validators.get(req.command) if _compiled_validators is not None else None
+                if compiled is not None:
+                    compiled.validate(res.json)
+                elif req.schema is not None:
+                    jsonschema.validate(instance=res.json, schema=req.schema, cls=_FallbackValidator)
+            except _VALIDATION_ERRORS as err:
                 print(f"JSON schema validation error on {path}: {err}")
                 print(f"argv: {req.argv}")
                 try:
@@ -339,8 +406,15 @@ if __name__ == '__main__':
         paths.append(path)
 
     counter = collections.Counter()
-    # Spin several processes to handle the files in parallel
-    with multiprocessing.Pool(multiprocessing.cpu_count()) as pool:
+    # Spin several processes to handle the files in parallel.
+    # initializer=_init_worker compiles all schemas once per worker process
+    # (Plan 1), so the compilation cost is not repeated for every file.
+    # docs is serialized only once per worker (not once per file).
+    with multiprocessing.Pool(
+        multiprocessing.cpu_count(),
+        initializer=_init_worker,
+        initargs=(docs,),
+    ) as pool:
         func = partial(process_file, docs)
         # pool.map blocks until all the files have been processed
         for result in pool.map(func, paths):
