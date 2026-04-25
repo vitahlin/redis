@@ -106,8 +106,23 @@ sudo ip netns exec srv ip link set veth1 up
 确认网络通：
 
 ```bash
-ping -c 2 10.200.1.2
-sudo ip netns exec srv ping -c 2 10.200.1.1
+$ ping -c 2 10.200.1.2
+PING 10.200.1.2 (10.200.1.2) 56(84) bytes of data.
+64 bytes from 10.200.1.2: icmp_seq=1 ttl=64 time=0.404 ms
+64 bytes from 10.200.1.2: icmp_seq=2 ttl=64 time=0.045 ms
+
+--- 10.200.1.2 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1030ms
+rtt min/avg/max/mdev = 0.045/0.224/0.404/0.179 ms
+
+$ sudo ip netns exec srv ping -c 2 10.200.1.1
+PING 10.200.1.1 (10.200.1.1) 56(84) bytes of data.
+64 bytes from 10.200.1.1: icmp_seq=1 ttl=64 time=0.016 ms
+64 bytes from 10.200.1.1: icmp_seq=2 ttl=64 time=0.043 ms
+
+--- 10.200.1.1 ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1018ms
+rtt min/avg/max/mdev = 0.016/0.029/0.043/0.013 ms
 ```
 
 ---
@@ -133,7 +148,8 @@ sudo ip netns exec srv ./src/redis-server \
 确认 master 正常：
 
 ```bash
-sudo ip netns exec srv ./src/redis-cli -h 10.200.1.2 -p 6379 ping
+$ sudo ip netns exec srv ./src/redis-cli -h 10.200.1.2 -p 6379 ping
+PONG
 ```
 
 期望输出：
@@ -148,13 +164,27 @@ PONG
 
 Sentinel 会重写自己的配置文件，所以一定要给它一个可写目录和一份专用配置。
 
+这份“调试版”文档默认采用：
+
+- `daemonize no`
+- 单独开一个终端让 Sentinel **前台运行**
+- 在启动前由 shell 手动写入 `/tmp/redis-9956-sentinel/sentinel.pid`
+
+这样做的好处是：
+
+- 不会因为 daemonize/fork 搞乱 PID
+- 新开终端时可以直接 `cat /tmp/redis-9956-sentinel/sentinel.pid`
+- 更适合配合 `pidstat`、`ss`、`strace` 做调试
+
 ```bash
 mkdir -p /tmp/redis-9956-sentinel
 cat >/tmp/redis-9956-sentinel/sentinel.conf <<'EOF'
 port 26379
 bind 127.0.0.1
 protected-mode no
-daemonize yes
+daemonize no
+# 这个 pid 文件由启动 Sentinel 的 shell 手动写入，避免 daemonize/fork
+# 造成的 PID 混乱。
 pidfile /tmp/redis-9956-sentinel/sentinel.pid
 logfile /tmp/redis-9956-sentinel/sentinel.log
 dir /tmp/redis-9956-sentinel
@@ -181,17 +211,35 @@ EOF
 
 ## 8. 启动 Sentinel
 
+建议这里使用一个**专门的终端 A**，让 Sentinel 独占这个终端前台运行。
+
 ```bash
 cd /path/to/redis
 
-./src/redis-sentinel /tmp/redis-9956-sentinel/sentinel.conf
+# 在 exec 之前先把“当前 shell 的 PID”写入文件。
+# 因为下面会 exec 成 redis-sentinel，所以这个 PID 会直接变成 Sentinel 的 PID。
+echo $$ >/tmp/redis-9956-sentinel/sentinel.pid
+exec ./src/redis-sentinel /tmp/redis-9956-sentinel/sentinel.conf
 ```
+
+如果你更习惯兼容启动方式，也可以用：
+
+```bash
+echo $$ >/tmp/redis-9956-sentinel/sentinel.pid
+exec ./src/redis-server /tmp/redis-9956-sentinel/sentinel.conf --sentinel
+```
+
+> 注意：执行 `exec` 后，这个终端就会被 Sentinel 占用。后面的 `redis-cli`、`pidstat`、`iptables`、`ss`、`strace` 等命令，请在*
+*新的终端 B / C / D** 中执行。
 
 确认 Sentinel 已起来：
 
 ```bash
-./src/redis-cli -p 26379 ping
-./src/redis-cli -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME mymaster
+vitah@homeubu:~/redis$ ./src/redis-cli -p 26379 ping
+PONG
+vitah@homeubu:~/redis$ ./src/redis-cli -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME mymaster
+1) "10.200.1.2"
+2) "6379"
 ```
 
 建议再把 ping 周期调小一点，让异常更快打到读路径：
@@ -203,12 +251,128 @@ cd /path/to/redis
 你也可以看日志确认监控已建立：
 
 ```bash
-tail -f /tmp/redis-9956-sentinel/sentinel.log
+vitah@homeubu:~/redis$ tail -f /tmp/redis-9956-sentinel/sentinel.log
+2347329:X 25 Apr 2026 13:36:41.265 # WARNING Memory overcommit must be enabled! Without it, a background save or replication may fail under low memory condition. To fix this issue add 'vm.overcommit_memory = 1' to /etc/sysctl.conf and then reboot or run the command 'sysctl vm.overcommit_memory=1' for this to take effect.
+2347329:X 25 Apr 2026 13:36:41.265 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+2347329:X 25 Apr 2026 13:36:41.265 * Redis version=255.255.255, bits=64, commit=b70384f7, modified=0, pid=2347329, just started
+2347329:X 25 Apr 2026 13:36:41.265 * Configuration loaded
+2347329:X 25 Apr 2026 13:36:41.266 * Increased maximum number of open files to 10032 (it was originally set to 1024).
+2347329:X 25 Apr 2026 13:36:41.266 * monotonic clock: POSIX clock_gettime
+2347329:X 25 Apr 2026 13:36:41.266 * Running mode=sentinel, port=26379.
+2347329:X 25 Apr 2026 13:36:41.277 * Sentinel new configuration saved on disk
+2347329:X 25 Apr 2026 13:36:41.277 * Sentinel ID is fcd9234c6ee0644e925ea4eb987ba079c66afbab
+2347329:X 25 Apr 2026 13:36:41.277 # +monitor master mymaster 10.200.1.2 6379 quorum 1
+```
+
+对应的
+
+- SENTINEL_PID=2347329
+- SENTINEL_PORT=26379
+- MASTER_NAME=mymaster
+- MASTER_IP=10.200.1.2
+- MASTER_PORT=6379
+
+```shell
+# 获取SENTINEL_SPORT
+$ while true; do
+  SPORT=$(sudo ss -tanp | awk -v pid="$(cat /tmp/redis-9956-sentinel/sentinel.pid)" -v dst="10.200.1.2:6379" '$1=="ESTAB" && $5==dst && $0~("pid=" pid ","){n=split($4,a,":"); print a[n]; exit}')
+  [ -n "$SPORT" ] && break
+  sleep 0.1
+done
+printf 'SENTINEL_SPORT=%s\n' "$SPORT"
 ```
 
 ---
 
-## 9. 记录 Sentinel PID 和目标连接的 source port
+## 9. 需要记录的信息（给新终端直接复用）
+
+在这个实验里，建议你明确记录下面这些运行时信息。它们在排错、跨终端复用、以及重新注入旧连接时都很重要：
+
+- `SENTINEL_PID`
+   - 当前 Sentinel 进程 PID
+   - 用于 `pidstat`、`ss`、`strace`、`kill`
+   - 只要 Sentinel 重启，这个值就会变化
+- `SENTINEL_PORT`
+   - Sentinel 监听端口
+   - 本文默认是 `26379`
+   - 用于 `redis-cli -p <port>`
+- `MASTER_NAME`
+   - Sentinel 监控的 master 名称
+   - 本文默认是 `mymaster`
+   - 用于 `SENTINEL GET-MASTER-ADDR-BY-NAME`
+- `MASTER_IP`
+   - 当前 `mymaster` 指向的 master IP
+   - 用于 `iptables` 注入、`ss` 过滤、连接确认
+   - 如果 Sentinel 的视图变化，这个值也要重新获取
+- `MASTER_PORT`
+   - 当前 `mymaster` 指向的 master 端口
+   - 通常是 `6379`
+   - 用于 `iptables` 注入、`ss` 过滤、连接确认
+- `SENTINEL_SPORT`
+   - Sentinel 到 master 的“当前旧连接”的本地源端口
+   - `iptables` 用 `--sport "$SENTINEL_SPORT"` 只毒化这条旧连接
+   - 只要 Sentinel 重连，这个值就会变化，注入前建议重新获取
+
+补充说明：`sudo ss -tanp` 往往会看到 Sentinel 对同一个 master 存在不止一条 `ESTAB` 连接，这是正常的。本文中的
+`SENTINEL_SPORT` 指的是**你本次准备注入的那条旧连接**。
+
+建议在**终端 B**里执行下面这段，拿到当前实验上下文，并把它保存成环境文件：
+
+```bash
+SENTINEL_PORT=26379
+MASTER_NAME=mymaster
+SENTINEL_PID=$(cat /tmp/redis-9956-sentinel/sentinel.pid)
+MASTER_IP=$(./src/redis-cli --raw -p "$SENTINEL_PORT" SENTINEL GET-MASTER-ADDR-BY-NAME "$MASTER_NAME" | awk 'NR==1{gsub(/\r/, ""); print; exit}')
+MASTER_PORT=$(./src/redis-cli --raw -p "$SENTINEL_PORT" SENTINEL GET-MASTER-ADDR-BY-NAME "$MASTER_NAME" | awk 'NR==2{gsub(/\r/, ""); print; exit}')
+
+while true; do
+  SENTINEL_SPORT=$(sudo ss -tanp | awk -v pid="$SENTINEL_PID" -v dst="$MASTER_IP:$MASTER_PORT" '$1=="ESTAB" && $5==dst && $0~("pid=" pid ","){n=split($4,a,":"); print a[n]; exit}')
+  [ -n "$SENTINEL_SPORT" ] && break
+  sleep 0.1
+done
+
+cat >/tmp/redis-9956-sentinel/context.env <<EOF
+export SENTINEL_PORT=$SENTINEL_PORT
+export MASTER_NAME=$MASTER_NAME
+export SENTINEL_PID=$SENTINEL_PID
+export MASTER_IP=$MASTER_IP
+export MASTER_PORT=$MASTER_PORT
+export SENTINEL_SPORT=$SENTINEL_SPORT
+EOF
+
+$ printf 'Saved /tmp/redis-9956-sentinel/context.env\n'
+Saved /tmp/redis-9956-sentinel/context.env
+
+$ printf 'SENTINEL_PID=[%s]\nMASTER_IP=[%s]\nMASTER_PORT=[%s]\nSENTINEL_SPORT=[%s]\n' \
+  "$SENTINEL_PID" "$MASTER_IP" "$MASTER_PORT" "$SENTINEL_SPORT"
+```
+
+### 新开一个终端后怎么直接用
+
+```bash
+source /tmp/redis-9956-sentinel/context.env
+printf 'PID=%s MASTER=%s:%s SPORT=%s\n' \
+  "$SENTINEL_PID" "$MASTER_IP" "$MASTER_PORT" "$SENTINEL_SPORT"
+```
+
+### 哪些值需要重新获取
+
+- `SENTINEL_PID`
+   - 只要你重启了 Sentinel，就要重新记录
+- `SENTINEL_SPORT`
+   - 只要 Sentinel 重连了 master，就要重新记录
+- `MASTER_IP` / `MASTER_PORT`
+   - 如果 `mymaster` 指向发生变化，也要重新记录
+
+一个简单原则是：
+
+- 只要你**重启了 Sentinel**，重新取一次 `SENTINEL_PID`
+- 只要你准备**重新注入旧连接**，重新取一次 `SENTINEL_SPORT`
+- 只要你怀疑 Sentinel 视图变化，重新取一次 `MASTER_IP` / `MASTER_PORT`
+
+---
+
+## 10. 记录 Sentinel PID 和目标连接的 source port
 
 先拿到 Sentinel 的 pid，并从 Sentinel 自己的视图里读取当前 master 地址：
 
@@ -256,7 +420,7 @@ echo "SENTINEL_SPORT=$SENTINEL_SPORT"
 
 ---
 
-## 10. 先看注入前的 baseline
+## 11. 先看注入前的 baseline
 
 ### 看 CPU
 
@@ -279,7 +443,7 @@ sudo strace -tt -p "$(cat /tmp/redis-9956-sentinel/sentinel.pid)" \
 
 ---
 
-## 11. 注入 `ICMP port-unreachable`
+## 12. 注入 `ICMP port-unreachable`
 
 现在只对这条 Sentinel 现有连接动刀：
 
@@ -294,10 +458,14 @@ while true; do
 done
 SENTINEL_SPORT=$(printf '%s' "$SENTINEL_SPORT" | tr -d '\r')
 
-printf 'MASTER_IP=[%s]\nMASTER_PORT=[%s]\nSENTINEL_PID=[%s]\nSENTINEL_SPORT=[%s]\n' \
+$ printf 'MASTER_IP=[%s]\nMASTER_PORT=[%s]\nSENTINEL_PID=[%s]\nSENTINEL_SPORT=[%s]\n' \
   "$MASTER_IP" "$MASTER_PORT" "$SENTINEL_PID" "$SENTINEL_SPORT"
+MASTER_IP=[10.200.1.2]
+MASTER_PORT=[6379]
+SENTINEL_PID=[2347329]
+SENTINEL_SPORT=[57346]
 
-sudo iptables -I OUTPUT \
+$ sudo iptables -I OUTPUT \
   -p tcp \
   -d "$MASTER_IP" \
   --dport "$MASTER_PORT" \
@@ -308,7 +476,10 @@ sudo iptables -I OUTPUT \
 确认规则存在：
 
 ```bash
-sudo iptables -L OUTPUT -n --line-numbers
+vitah@homeubu:~/redis$ sudo iptables -L OUTPUT -n --line-numbers
+Chain OUTPUT (policy ACCEPT)
+num  target     prot opt source               destination         
+1    REJECT     6    --  0.0.0.0/0            10.200.1.2           tcp spt:57346 dpt:6379 reject-with icmp-port-unreachable
 ```
 
 然后等待 3~5 秒：
@@ -327,7 +498,7 @@ sleep 5
 
 ---
 
-## 12. 预期现象：修复前（buggy hiredis）
+## 13. 预期现象：修复前（buggy hiredis）
 
 ### 1) `pidstat`
 
@@ -363,7 +534,7 @@ recvfrom(fd, ..., 16384, 0, ...) = -1 EAGAIN (Resource temporarily unavailable)
 
 ---
 
-## 13. 预期现象：修复后
+## 14. 预期现象：修复后
 
 当你把 `docs/sentinel.md` 里 `getsockopt(SO_ERROR)` 的修复打进去、重新构建、再跑同样步骤后：
 
@@ -400,7 +571,7 @@ sudo ss -tanp | awk \
 
 ---
 
-## 14. 如果修复前卡死了，怎么人工恢复
+## 15. 如果修复前卡死了，怎么人工恢复
 
 文档里分析过，`SENTINEL RESET` 会把死连接摘掉，所以可以作为恢复手段：
 
@@ -418,7 +589,62 @@ sudo ss -tanp | awk \
 
 ---
 
-## 15. 做完实验后清理环境
+## 16. 完整重置环境并重新开始
+
+如果你要从头重新验证，最稳妥的方式不是只“停掉几个进程”，而是把：
+
+- `iptables` 规则
+- Sentinel / master 进程
+- namespace / veth 网络拓扑
+- `/tmp/redis-9956-sentinel` 里的上下文文件
+
+都一起清掉。下面这段命令可以直接复制执行。
+
+### 一键完整重置
+
+```bash
+export REDIS_ROOT=/path/to/redis
+cd "$REDIS_ROOT"
+
+echo '== 1) 删除实验插入的 REJECT 规则 =='
+sudo iptables -L OUTPUT -n --line-numbers || true
+while read -r n rest; do
+  sudo iptables -D OUTPUT "$n" || true
+done < <(sudo iptables -L OUTPUT -n --line-numbers | awk '/icmp-port-unreachable/ {print $1}' | sort -rn)
+
+echo '== 2) 停掉 Sentinel 和 master =='
+pkill -f 'redis-sentinel|redis-server .*--sentinel' 2>/dev/null || true
+sudo ip netns exec srv pkill -f 'redis-server.*10.200.1.2' 2>/dev/null || true
+
+echo '== 3) 删除网络拓扑 =='
+sudo ip link del veth0 2>/dev/null || true
+sudo ip netns del srv 2>/dev/null || true
+
+echo '== 4) 删除临时文件 =='
+rm -rf /tmp/redis-9956-sentinel
+rm -f /tmp/redis-9956-master.pid /tmp/redis-9956-master.log
+
+echo '== 5) （可选）重新构建 =='
+make MALLOC=libc
+```
+
+### 重置后重新开始的顺序
+
+执行完上面的完整重置后，建议按这个顺序重新开始：
+
+1. 重新创建 `srv` namespace 和 `veth`
+2. 重新启动 namespace 内的 master
+3. 重新生成 Sentinel 配置
+4. 用 `daemonize no` 在终端 A 前台启动 Sentinel
+5. 在终端 B 重新记录：
+   - `SENTINEL_PID`
+   - `MASTER_IP`
+   - `MASTER_PORT`
+   - `SENTINEL_SPORT`
+6. 再执行 `iptables` 注入
+7. 再观察 `pidstat` / `ss` / `strace`
+
+### 只做收尾清理时的最小步骤
 
 ### 1) 删掉 `iptables` 规则
 
@@ -462,7 +688,7 @@ rm -f /tmp/redis-9956-master.pid /tmp/redis-9956-master.log
 
 ---
 
-## 16. 如果没有复现出高 CPU，优先检查这些点
+## 17. 如果没有复现出高 CPU，优先检查这些点
 
 ### 1) 你是不是在原生 Ubuntu 上跑
 
@@ -509,7 +735,7 @@ rm -f /tmp/redis-9956-master.pid /tmp/redis-9956-master.log
 
 ---
 
-## 17. 这个文档和现有回归测试的关系
+## 18. 这个文档和现有回归测试的关系
 
 仓库里已经有一个回归测试：
 
@@ -531,7 +757,7 @@ rm -f /tmp/redis-9956-master.pid /tmp/redis-9956-master.log
 
 ---
 
-## 18. 推荐的验证顺序
+## 19. 推荐的验证顺序
 
 建议你按下面顺序做：
 
@@ -551,7 +777,7 @@ rm -f /tmp/redis-9956-master.pid /tmp/redis-9956-master.log
 
 ---
 
-## 19. 复制即用：一套 end-to-end 命令清单
+## 20. 复制即用：一套 end-to-end 命令清单
 
 如果你想最少切换上下文，可以直接按下面顺序执行。假设仓库根目录是：
 
@@ -616,7 +842,7 @@ cat >/tmp/redis-9956-sentinel/sentinel.conf <<'EOF'
 port 26379
 bind 127.0.0.1
 protected-mode no
-daemonize yes
+daemonize no
 pidfile /tmp/redis-9956-sentinel/sentinel.pid
 logfile /tmp/redis-9956-sentinel/sentinel.log
 dir /tmp/redis-9956-sentinel
@@ -625,8 +851,18 @@ sentinel down-after-milliseconds mymaster 60000
 sentinel failover-timeout mymaster 180000
 sentinel parallel-syncs mymaster 1
 EOF
+```
 
-"$REDIS_ROOT"/src/redis-sentinel /tmp/redis-9956-sentinel/sentinel.conf
+在**终端 A**里前台启动 Sentinel：
+
+```bash
+echo $$ >/tmp/redis-9956-sentinel/sentinel.pid
+exec "$REDIS_ROOT"/src/redis-sentinel /tmp/redis-9956-sentinel/sentinel.conf
+```
+
+在**终端 B**里继续执行下面这些确认命令：
+
+```bash
 "$REDIS_ROOT"/src/redis-cli -p 26379 ping
 "$REDIS_ROOT"/src/redis-cli -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME mymaster
 "$REDIS_ROOT"/src/redis-cli -p 26379 SENTINEL DEBUG ping-period 100
@@ -636,8 +872,9 @@ EOF
 
 ```bash
 SENTINEL_PID=$(cat /tmp/redis-9956-sentinel/sentinel.pid)
-MASTER_IP=$("$REDIS_ROOT"/src/redis-cli --raw -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME mymaster | sed -n '1p')
-MASTER_PORT=$("$REDIS_ROOT"/src/redis-cli --raw -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME mymaster | sed -n '2p')
+MASTER_NAME=mymaster
+MASTER_IP=$("$REDIS_ROOT"/src/redis-cli --raw -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME "$MASTER_NAME" | awk 'NR==1{gsub(/\r/, ""); print; exit}')
+MASTER_PORT=$("$REDIS_ROOT"/src/redis-cli --raw -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME "$MASTER_NAME" | awk 'NR==2{gsub(/\r/, ""); print; exit}')
 
 while true; do
   SENTINEL_SPORT=$(sudo ss -tanp | awk \
@@ -650,8 +887,20 @@ while true; do
   sleep 0.1
 done
 
+cat >/tmp/redis-9956-sentinel/context.env <<EOF
+export SENTINEL_PORT=26379
+export MASTER_NAME=$MASTER_NAME
+export SENTINEL_PID=$SENTINEL_PID
+export MASTER_IP=$MASTER_IP
+export MASTER_PORT=$MASTER_PORT
+export SENTINEL_SPORT=$SENTINEL_SPORT
+EOF
+
 echo "SENTINEL_PID=$SENTINEL_PID"
+echo "MASTER_IP=$MASTER_IP"
+echo "MASTER_PORT=$MASTER_PORT"
 echo "SENTINEL_SPORT=$SENTINEL_SPORT"
+echo "Saved /tmp/redis-9956-sentinel/context.env"
 ```
 
 ### 7) 注入故障
@@ -706,7 +955,7 @@ sudo ip netns del srv 2>/dev/null || true
 
 ---
 
-## 20. 补充观测命令
+## 21. 补充观测命令
 
 除了 `pidstat` 和 `strace`，下面这些命令也很有帮助。
 
