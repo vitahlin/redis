@@ -524,6 +524,23 @@ robj *createStreamObject(void) {
     return o;
 }
 
+robj *createGCRAObject(long long value) {
+    /* NOTE: for 32-bit systems we can't use integer encoding (as OBJ_STRING does)
+     * as the GCRA object is a unixtime value in microseconds, which as of the
+     * time of writing is already much more than 32-bit's LONG_MAX. */
+#if UINTPTR_MAX == 0xffffffff
+    long long *v = zmalloc(sizeof(long long));
+    *v = value;
+    robj *o = createObject(OBJ_GCRA,v);
+#else
+    robj *o = createObject(OBJ_GCRA,NULL);
+    o->ptr = (void*)value;
+#endif
+
+    o->encoding = OBJ_ENCODING_INT;
+    return o;
+}
+
 robj *createModuleObject(moduleType *mt, void *value) {
     moduleValue *mv = zmalloc(sizeof(*mv));
     mv->type = mt;
@@ -599,6 +616,14 @@ void freeStreamObject(robj *o) {
     freeStream(o->ptr);
 }
 
+void freeGCRAObject(robj *o) {
+#if UINTPTR_MAX == 0xffffffff
+    zfree(o->ptr);
+#else
+    (void)o;
+#endif
+}
+
 void incrRefCount(robj *o) {
     if (o->refcount < OBJ_FIRST_SPECIAL_REFCOUNT - 1) {
         o->refcount++;
@@ -642,6 +667,7 @@ void decrRefCount(robj *o) {
             case OBJ_HASH: freeHashObject(o); break;
             case OBJ_MODULE: freeModuleObject(o); break;
             case OBJ_STREAM: freeStreamObject(o); break;
+            case OBJ_GCRA: freeGCRAObject(o); break;
             default: serverPanic("Unknown object type"); break;
             }
         }
@@ -705,8 +731,7 @@ void dismissSetObject(robj *o, size_t size_hint) {
         }
 
         /* Dismiss hash table memory. */
-        dismissMemory(set->ht_table[0], DICTHT_SIZE(set->ht_size_exp[0])*sizeof(dictEntry*));
-        dismissMemory(set->ht_table[1], DICTHT_SIZE(set->ht_size_exp[1])*sizeof(dictEntry*));
+        dismissDictBucketsMemory(set);
     } else if (o->encoding == OBJ_ENCODING_INTSET) {
         dismissMemory(o->ptr, intsetBlobLen((intset*)o->ptr));
     } else if (o->encoding == OBJ_ENCODING_LISTPACK) {
@@ -734,9 +759,7 @@ void dismissZsetObject(robj *o, size_t size_hint) {
         }
 
         /* Dismiss hash table memory. */
-        dict *d = zs->dict;
-        dismissMemory(d->ht_table[0], DICTHT_SIZE(d->ht_size_exp[0])*sizeof(dictEntry*));
-        dismissMemory(d->ht_table[1], DICTHT_SIZE(d->ht_size_exp[1])*sizeof(dictEntry*));
+        dismissDictBucketsMemory(zs->dict);
     } else if (o->encoding == OBJ_ENCODING_LISTPACK) {
         dismissMemory(o->ptr, lpBytes((unsigned char*)o->ptr));
     } else {
@@ -762,8 +785,7 @@ void dismissHashObject(robj *o, size_t size_hint) {
         }
 
         /* Dismiss hash table memory. */
-        dismissMemory(d->ht_table[0], DICTHT_SIZE(d->ht_size_exp[0])*sizeof(dictEntry*));
-        dismissMemory(d->ht_table[1], DICTHT_SIZE(d->ht_size_exp[1])*sizeof(dictEntry*));
+        dismissDictBucketsMemory(d);
     } else if (o->encoding == OBJ_ENCODING_LISTPACK) {
         dismissMemory(o->ptr, lpBytes((unsigned char*)o->ptr));
     } else if (o->encoding == OBJ_ENCODING_LISTPACK_EX) {
@@ -794,6 +816,13 @@ void dismissStreamObject(robj *o, size_t size_hint) {
     }
 }
 
+void dismissGCRAObject(robj *o, size_t size_hint) {
+    /* GCRA is a single allocation of a long long thus way smaller than a
+     * page-size. The dismiss mechanism is not needed for it - hence NOOP.*/
+    (void)o;
+    (void)size_hint;
+}
+
 /* When creating a snapshot in a fork child process, the main process and child
  * process share the same physical memory pages, and if / when the parent
  * modifies any keys due to write traffic, it'll cause CoW which consume
@@ -822,6 +851,7 @@ void dismissObject(robj *o, size_t size_hint) {
         case OBJ_ZSET: dismissZsetObject(o, size_hint); break;
         case OBJ_HASH: dismissHashObject(o, size_hint); break;
         case OBJ_STREAM: dismissStreamObject(o, size_hint); break;
+        case OBJ_GCRA: dismissGCRAObject(o, size_hint); break;
         default: break;
     }
 #else
@@ -943,6 +973,7 @@ size_t getObjectLength(robj *o) {
         case OBJ_ZSET: return zsetLength(o);
         case OBJ_HASH: return hashTypeLength(o, 0);
         case OBJ_STREAM: return streamLength(o);
+        case OBJ_GCRA: return gcraObjectLength(o);
         default: return 0;
     }
 }
@@ -1156,6 +1187,22 @@ int getLongLongFromObject(robj *o, long long *target) {
     return C_OK;
 }
 
+int getLongLongFromGCRAObject(robj *o, long long *target) {
+    long long res;
+    serverAssertWithInfo(NULL, o, o->type == OBJ_GCRA);
+    serverAssert(o->encoding == OBJ_ENCODING_INT);
+#if UINTPTR_MAX == 0xffffffff
+    res = *((long long*)o->ptr);
+#else
+    res = (long long)o->ptr;
+#endif
+    if (unlikely(res < 0)) {
+        serverPanic("Invalid negative GCRA value");
+    }
+    *target = res;
+    return C_OK;
+}
+
 int getLongLongFromObjectOrReply(client *c, robj *o, long long *target, const char *msg) {
     long long value;
     if (getLongLongFromObject(o, &value) != C_OK) {
@@ -1246,7 +1293,8 @@ size_t kvobjComputeSize(robj *key, kvobj *o, size_t sample_size, int dbid) {
         o->type == OBJ_SET ||
         o->type == OBJ_ZSET ||
         o->type == OBJ_HASH ||
-        o->type == OBJ_STREAM)
+        o->type == OBJ_STREAM ||
+        o->type == OBJ_GCRA)
     {
         return kvobjAllocSize(o);
     } else if (o->type == OBJ_MODULE) {
@@ -1272,10 +1320,29 @@ size_t kvobjAllocSize(kvobj *o) {
     } else if (o->type == OBJ_STREAM) {
         stream *s = o->ptr;
         asize += s->alloc_size;
+    } else if (o->type == OBJ_GCRA) {
+        asize += gcraTypeAllocSize(o);
     } else if (o->type == OBJ_MODULE) {
         /* TODO: Provide moduleGetAllocSize() module API for O(1) allocation size retrieval */
     }
     return asize;
+}
+
+size_t gcraTypeAllocSize(robj *o) {
+    (void)o;
+#if UINTPTR_MAX == 0xffffffff
+    return sizeof(long long);
+#else
+    /* Same as string with int encoding there is no allocation as the value is
+     * cast to void* and stored in o->ptr */
+    return 0;
+#endif
+}
+
+/* The gcra object is a single long long value */
+size_t gcraObjectLength(robj *o) {
+    (void)o;
+    return 1;
 }
 
 /* Release data obtained with getMemoryOverheadData(). */

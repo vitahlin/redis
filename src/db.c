@@ -1769,7 +1769,8 @@ char *obj_type_name[OBJ_TYPE_MAX] = {
     "zset", 
     "hash", 
     NULL, /* module type is special */
-    "stream"
+    "stream",
+    "gcra"
 };
 
 /* Helper function to get type from a string in scan commands */
@@ -1926,8 +1927,7 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
          * COUNT, so if the hash table is in a pathological state (very
          * sparsely populated) we avoid to block too much time at the cost
          * of returning no or very few elements. */
-        // todo:vitah 溢出
-        long maxiterations = count*10;
+        long maxiterations = (count > LONG_MAX / 10) ? LONG_MAX : count * 10;
 
         /* We pass scanData which have three pointers to the callback:
          * 1. data.keys: the list to which it will add new elements;
@@ -2454,6 +2454,7 @@ void copyCommand(client *c) {
         case OBJ_ZSET: newobj = zsetDup(o); break;
         case OBJ_HASH: newobj = hashTypeDup(o, &minHashExpire); break;
         case OBJ_STREAM: newobj = streamDup(o); break;
+        case OBJ_GCRA: newobj = gcraDup(o); break;
         case OBJ_MODULE:
             newobj = moduleTypeDupOrReply(c, key, newkey, dst->id, o);
             if (!newobj) return;
