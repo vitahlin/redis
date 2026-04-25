@@ -1027,3 +1027,11 @@ tail -f /tmp/redis-9956-sentinel/sentinel.log | \
 ```
 
 它和 `./src/redis-sentinel /tmp/redis-9956-sentinel/sentinel.conf` 的目标是一致的；二选一即可。
+
+```shell
+vitah@homeubu:~/redis$ sudo ip netns exec srv ./src/redis-cli -h 10.200.1.2 -p 6379 CLIENT LIST
+[sudo] password for vitah:
+id=5 addr=10.200.1.1:57330 laddr=10.200.1.2:6379 fd=11 name=sentinel-fcd9234c-cmd age=2689 idle=0 flags=N db=0 sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=1048 rbp=11 obl=0 oll=0 omem=0 tot-mem=2128 events=r cmd=ping user=default redir=-1 resp=2 lib-name= lib-ver= io-thread=0 tot-net-in=443044 tot-net-out=1893187 tot-cmds=20243 read-events=19454 avg-pipeline-len-sum=20243 avg-pipeline-len-cnt=19454
+id=7 addr=10.200.1.1:46604 laddr=10.200.1.2:6379 fd=13 name=sentinel-fcd9234c-pubsub age=1278 idle=1 flags=P db=0 sub=1 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=1032 rbp=135 obl=0 oll=0 omem=0 tot-mem=2168 events=r cmd=subscribe user=default redir=-1 resp=2 lib-name= lib-ver= io-thread=0 tot-net-in=104 tot-net-out=84833 tot-cmds=2 read-events=1 avg-pipeline-len-sum=2 avg-pipeline-len-cnt=1
+id=8 addr=10.200.1.2:53956 laddr=10.200.1.2:6379 fd=12 name= age=0 idle=0 flags=N db=0 sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=26 qbuf-free=16360 argv-mem=10 multi-mem=0 rbs=16392 rbp=16392 obl=0 oll=0 omem=0 tot-mem=33890 events=r cmd=client|list user=default redir=-1 resp=2 lib-name= lib-ver= io-thread=0 tot-net-in=26 tot-net-out=0 tot-cmds=0 read-events=1 avg-pipeline-len-sum=1 avg-pipeline-len-cnt=1
+```
