@@ -1099,7 +1099,26 @@ need_full_resync:
  * 2) Flush the Lua scripting script cache if the BGSAVE was actually
  *    started.
  *
- * Returns C_OK on success or C_ERR otherwise. */
+ * Returns C_OK on success or C_ERR otherwise.
+ *
+ * 中文补充：为 replication full sync 启动一次 BGSAVE。
+ *
+ * 这个函数负责根据配置和 replica 能力选择 RDB 输出目标：
+ * - disk target：RDB child 把快照写到磁盘文件，replica 后续从文件读取。
+ * - socket target：diskless replication，RDB child 生成数据后通过 socket/pipe
+ *   流式发送给 replica。
+ *
+ * mincapa 是所有等待本次 BGSAVE 的 replica capability 的按位与。
+ * 因此它表示“所有等待者共同支持的能力”，可以用 SLAVE_CAPA_* 宏检查，
+ * 例如是否所有 replica 都支持 EOF marker，从而能否走 diskless socket target。
+ *
+ * 除了启动 BGSAVE，本函数还有两个副作用：
+ *
+ * 1) 处理 WAIT_BGSAVE_START 状态的 replica：
+ *    - 如果 BGSAVE 启动成功，把它们准备成 full sync 状态；
+ *    - 如果 BGSAVE 启动失败，给它们返回错误并从 slaves 列表移除。
+ *
+ * 2) 如果真的启动了 BGSAVE，会刷新 Lua script cache，避免 replica 缺失脚本。 */
 int startBgsaveForReplication(int mincapa, int req) {
     int retval;
     int socket_target = 0;
@@ -1108,30 +1127,49 @@ int startBgsaveForReplication(int mincapa, int req) {
 
     /* We use a socket target if slave can handle the EOF marker and we're configured to do diskless syncs.
      * Note that in case we're creating a "filtered" RDB (functions-only, for example) we also force socket replication
-     * to avoid overwriting the snapshot RDB file with filtered data. */
+     * to avoid overwriting the snapshot RDB file with filtered data.
+     *
+     * 中文补充：判断这次 full sync 是否使用 socket target。普通 diskless replication
+     * 需要 master 配置 repl-diskless-sync，且所有等待的 replica 都支持 EOF marker。
+     * filtered RDB 也会强制使用 socket target，因为它不是完整快照，不能覆盖普通磁盘 RDB 文件。 */
     socket_target = (server.repl_diskless_sync || req & SLAVE_REQ_RDB_MASK) && (mincapa & SLAVE_CAPA_EOF);
-    /* `SYNC` should have failed with error if we don't support socket and require a filter, assert this here */
+    /* `SYNC` should have failed with error if we don't support socket and require a filter, assert this here.
+     *
+     * 中文补充：如果请求的是 filtered RDB，却不能使用 socket target，SYNC 阶段应该已经报错。
+     * 这里用 assert 保证不会继续生成一个错误的磁盘 filtered RDB。 */
     serverAssert(socket_target || !(req & SLAVE_REQ_RDB_MASK));
 
+    /* slots_req 是 slot migration 相关的特殊 RDB 请求，日志里单独区分目标。 */
     int slots_req = req & SLAVE_REQ_SLOTS_SNAPSHOT;
     serverLog(LL_NOTICE,"Starting BGSAVE for SYNC with target: %s%s",
         socket_target ? (slots_req ? "slot migration destination socket" : "replicas sockets") : "disk",
         (req & SLAVE_REQ_RDB_CHANNEL) ? " (rdb-channel)" : "");
 
+    /* rdbSaveInfo 记录 repl-stream-db、replid、offset 等复制元信息。
+     * RDB 里需要携带这些信息，replica 加载后才能继续正确接收命令流。 */
     rdbSaveInfo rsi, *rsiptr;
     rsiptr = rdbPopulateSaveInfo(&rsi);
     /* Only do rdbSave* when rsiptr is not NULL,
-     * otherwise slave will miss repl-stream-db. */
+     * otherwise slave will miss repl-stream-db.
+     *
+     * 中文补充：只有拿到 rdbSaveInfo 时才真正启动 RDB 保存。
+     * 如果没有这些复制元信息，replica 会缺失 repl-stream-db 等信息，不能安全同步。 */
     if (rsiptr) {
+        /* socket target：走 diskless 路径，RDB child 输出到 replica sockets/parent pipe。 */
         if (socket_target)
             retval = rdbSaveToSlavesSockets(req,rsiptr);
         else {
-            /* Keep the page cache since it'll get used soon */
+            /* Keep the page cache since it'll get used soon.
+             *
+             * 中文补充：disk target 会生成普通磁盘 RDB 文件；KEEP_CACHE 表示保留 page cache，
+             * 因为 replica 很快会读取这个文件。 */
             retval = rdbSaveBackground(req, server.rdb_filename, rsiptr, RDBFLAGS_REPLICATION | RDBFLAGS_KEEP_CACHE);
         }
+        /* 测试/调试用：fork 后按配置暂停，方便制造特定时序。 */
         if (server.repl_debug_pause & REPL_DEBUG_AFTER_FORK)
             debugPauseProcess();
     } else {
+        /* 当前无法生成复制元信息，不能启动 full sync RDB。 */
         serverLog(LL_WARNING,"BGSAVE for replication: replication information not available, can't generate the RDB file right now. Try later.");
         retval = C_ERR;
     }
@@ -1140,13 +1178,20 @@ int startBgsaveForReplication(int mincapa, int req) {
      * this fact, so that we can later delete the file if needed. Note
      * that we don't set the flag to 1 if the feature is disabled, otherwise
      * it would never be cleared: the file is not deleted. This way if
-     * the user enables it later with CONFIG SET, we are fine. */
+     * the user enables it later with CONFIG SET, we are fine.
+     *
+     * 中文补充：如果 disk target BGSAVE 启动成功，并且配置允许删除 replication 临时 RDB，
+     * 就记录这个 RDB 文件是 replication 生成的，后续可按需删除。 */
     if (retval == C_OK && !socket_target && server.rdb_del_sync_files)
         RDBGeneratedByReplication = 1;
 
     /* If we failed to BGSAVE, remove the slaves waiting for a full
      * resynchronization from the list of slaves, inform them with
-     * an error about what happened, close the connection ASAP. */
+     * an error about what happened, close the connection ASAP.
+     *
+     * 中文补充：BGSAVE 启动失败时，清理所有正在等待 full resync 的 replica。
+     * 这些 replica 已经被放进 server.slaves，并处于 WAIT_BGSAVE_START；
+     * 如果继续保留，它们会一直等待一个不存在的 RDB。 */
     if (retval == C_ERR) {
         serverLog(LL_WARNING,"BGSAVE for replication failed");
         listRewind(server.slaves,&li);
@@ -1154,6 +1199,7 @@ int startBgsaveForReplication(int mincapa, int req) {
             client *slave = ln->value;
 
             if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START) {
+                /* 这个 replica 还没有真正进入 full sync 传输阶段，直接撤销 replica 身份。 */
                 slave->replstate = REPL_STATE_NONE;
                 slave->flags &= ~CLIENT_SLAVE;
                 listDelNode(server.slaves,ln);
@@ -1166,14 +1212,21 @@ int startBgsaveForReplication(int mincapa, int req) {
     }
 
     /* If the target is socket, rdbSaveToSlavesSockets() already setup
-     * the slaves for a full resync. Otherwise for disk target do it now.*/
+     * the slaves for a full resync. Otherwise for disk target do it now.
+     *
+     * 中文补充：socket target 的 replica 状态已经在 rdbSaveToSlavesSockets() 里设置好了。
+     * disk target 不会在 rdbSaveBackground() 里直接处理 replica，所以这里需要把
+     * WAIT_BGSAVE_START 的 replica 推进到 full resync 状态，并发送 FULLRESYNC 回复。 */
     if (!socket_target) {
         listRewind(server.slaves,&li);
         while((ln = listNext(&li))) {
             client *slave = ln->value;
 
             if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START) {
-                /* Check slave has the exact requirements */
+                /* Check slave has the exact requirements.
+                 *
+                 * 中文补充：只处理请求类型完全匹配本次 BGSAVE 的 replica。
+                 * 例如 filtered RDB / rdb-only 等请求不能混用同一个 RDB。 */
                 if (slave->slave_req != req)
                     continue;
                 replicationSetupSlaveForFullResync(slave, getPsyncInitialOffset());
@@ -1184,27 +1237,40 @@ int startBgsaveForReplication(int mincapa, int req) {
     return retval;
 }
 
-/* SYNC and PSYNC command implementation. */
+/* SYNC and PSYNC command implementation.
+ *
+ * 中文补充：replica 建立复制关系时会向 master 发送 SYNC 或 PSYNC：
+ * - PSYNC 优先尝试 partial resync，只补齐 replication backlog 中缺失的命令。
+ * - 如果 partial resync 失败，或者客户端使用旧的 SYNC，则进入 full resync。
+ * - full resync 会触发或复用一次 BGSAVE，把 RDB 发送给 replica，随后再继续发送命令流。 */
 void syncCommand(client *c) {
-    /* ignore SYNC if already slave or in monitor mode */
+    /* ignore SYNC if already slave or in monitor mode.
+     * 中文补充：已经是 replica 的客户端不能再次发起 SYNC；MONITOR 客户端也不会走这里。 */
     if (c->flags & CLIENT_SLAVE) return;
 
     /* Check if this is a failover request to a replica with the same replid and
-     * become a master if so. */
+     * become a master if so.
+     *
+     * 中文补充：处理 PSYNC ... FAILOVER 请求。如果请求中的 replid 和当前节点 replid 匹配，
+     * 当前 replica 可以提升为 master。 */
     if (c->argc > 3 && !strcasecmp(c->argv[0]->ptr,"psync") && 
         !strcasecmp(c->argv[3]->ptr,"failover"))
     {
         serverLog(LL_NOTICE, "Failover request received for replid %s.",
             (unsigned char *)c->argv[1]->ptr);
+        /* 只有 replica 才能响应 PSYNC FAILOVER；master 收到该请求是非法的。 */
         if (!server.masterhost) {
             addReplyError(c, "PSYNC FAILOVER can't be sent to a master.");
             return;
         }
 
+        /* failover 请求必须指定和本节点当前复制 ID 相同的 replid。 */
         if (!strcasecmp(c->argv[1]->ptr,server.replid)) {
             if (server.cluster_enabled) {
+                /* 集群模式下，走集群自身的 promote 逻辑。 */
                 clusterPromoteSelfToMaster();
             } else {
+                /* 非集群模式下，直接取消 master 配置，切换为 master。 */
                 replicationUnsetMaster();
             }
             sds client = catClientInfoString(sdsempty(),c);
@@ -1217,14 +1283,19 @@ void syncCommand(client *c) {
         }
     }
 
-    /* Don't let replicas sync with us while we're failing over */
+    /* Don't let replicas sync with us while we're failing over.
+     * 中文补充：当前节点正在执行 failover 时，不允许新的 replica 跟自己同步，
+     * 否则 replica 可能拿到一个即将变化的复制拓扑状态。 */
     if (server.failover_state != NO_FAILOVER) {
         addReplyError(c,"-NOMASTERLINK Can't SYNC while failing over");
         return;
     }
 
     /* Refuse SYNC requests if we are a slave but the link with our master
-     * is not ok... */
+     * is not ok...
+     *
+     * 中文补充：如果当前节点本身是 replica，但还没有和它的 master 建立好连接，
+     * 就拒绝下游 replica 的 SYNC。否则下游会复制一个不可靠的数据源。 */
     if (server.masterhost && server.repl_state != REPL_STATE_CONNECTED) {
         addReplyError(c,"-NOMASTERLINK Can't SYNC while not connected with my master");
         return;
@@ -1233,7 +1304,11 @@ void syncCommand(client *c) {
     /* SYNC can't be issued when the server has pending data to send to
      * the client about already issued commands. We need a fresh reply
      * buffer registering the differences between the BGSAVE and the current
-     * dataset, so that we can copy to other slaves if needed. */
+     * dataset, so that we can copy to other slaves if needed.
+     *
+     * 中文补充：SYNC/PSYNC 要求客户端输出缓冲区是干净的。full sync 需要从一个明确的
+     * offset 开始记录 BGSAVE 期间产生的新命令；如果客户端已经有待发送回复，
+     * 就无法安全地把它切换成 replica。 */
     if (clientHasPendingReplies(c)) {
         addReplyError(c,"SYNC and PSYNC are invalid with pending output");
         return;
@@ -1241,7 +1316,10 @@ void syncCommand(client *c) {
 
     /* Fail sync if slave doesn't support EOF capability but wants a filtered RDB. This is because we force filtered
      * RDB's to be generated over a socket and not through a file to avoid conflicts with the snapshot files. Forcing
-     * use of a socket is handled, if needed, in `startBgsaveForReplication`. */
+     * use of a socket is handled, if needed, in `startBgsaveForReplication`.
+     *
+     * 中文补充：filtered RDB 必须走 socket/diskless 形式，因为不能覆盖普通 RDB 快照文件。
+     * socket 形式依赖 EOF marker 判断 RDB 流结束，所以 replica 必须声明 EOF capability。 */
     if (c->slave_req & SLAVE_REQ_RDB_MASK && !(c->slave_capa & SLAVE_CAPA_EOF)) {
         addReplyError(c,"Filtered replica requires EOF capability");
         return;
@@ -1258,25 +1336,33 @@ void syncCommand(client *c) {
      * +FULLRESYNC <replid> <offset>
      *
      * So the slave knows the new replid and offset to try a PSYNC later
-     * if the connection with the master is lost. */
+     * if the connection with the master is lost.
+     *
+     * 中文补充：如果这是 PSYNC，先尝试 partial resynchronization。成功时 master 只需要
+     * 发送 backlog 中缺失的命令，不需要生成 RDB；失败时继续走 full resync。 */
     if (!strcasecmp(c->argv[0]->ptr,"psync")) {
         long long psync_offset;
+        /* PSYNC 第二个参数是 replica 已处理到的复制 offset。 */
         if (getLongLongFromObjectOrReply(c, c->argv[2], &psync_offset, NULL) != C_OK) {
             serverLog(LL_WARNING, "Replica %s asks for synchronization but with a wrong offset",
                       replicationGetSlaveName(c));
             return;
         }
 
+        /* 尝试使用 replid + offset 从 backlog 中补齐命令。 */
         if (masterTryPartialResynchronization(c, psync_offset) == C_OK) {
             server.stat_sync_partial_ok++;
-            return; /* No full resync needed, return. */
+            return; /* No full resync needed, return. 中文补充：partial resync 成功，不需要 full resync。 */
         } else {
             char *master_replid = c->argv[1]->ptr;
 
             /* Increment stats for failed PSYNCs, but only if the
              * replid is not "?", as this is used by slaves to force a full
              * resync on purpose when they are not able to partially
-             * resync. */
+             * resync.
+             *
+             * 中文补充：统计失败的 PSYNC。replid == "?" 表示 replica 主动要求 full resync，
+             * 这种情况不算错误。 */
             if (master_replid[0] != '?') server.stat_sync_partial_err++;
             if (c->slave_capa & SLAVE_CAPA_RDB_CHANNEL_REPL) {
                 int len;
@@ -1284,7 +1370,11 @@ void syncCommand(client *c) {
                 /* Replica is capable of rdbchannel replication. This is
                  * replica's main channel. Let replica know full sync is needed.
                  * Replica will open another connection (rdbchannel). Once rdb
-                 * delivery starts, we'll stream repl data to the main channel.*/
+                 * delivery starts, we'll stream repl data to the main channel.
+                 *
+                 * 中文补充：replica 支持 rdb-channel replication。当前连接是 main channel；
+                 * master 先通知 replica 需要 full sync。replica 随后会再打开一条专用
+                 * rdbchannel 连接传输 RDB。 */
                 c->flags |= CLIENT_SLAVE;
                 c->replstate = SLAVE_STATE_WAIT_RDB_CHANNEL;
                 c->repl_ack_time = server.unixtime;
@@ -1296,7 +1386,10 @@ void syncCommand(client *c) {
                           "Full sync will continue with dedicated rdb channel.",
                           replicationGetSlaveName(c));
 
-                /* Send +RDBCHANNELSYNC with client id so we can associate replica connections on master.*/
+                /* Send +RDBCHANNELSYNC with client id so we can associate replica connections on master.
+                 *
+                 * 中文补充：发送 +RDBCHANNELSYNC 和 main channel client id。
+                 * replica 用这个 id 建立 rdbchannel 后，master 才能把两条连接关联起来。 */
                 len = snprintf(buf, sizeof(buf), "+RDBCHANNELSYNC %llu\r\n",
                                (unsigned long long) c->id);
                 if (connWrite(c->conn, buf, strlen(buf)) != len)
@@ -1308,37 +1401,56 @@ void syncCommand(client *c) {
     } else {
         /* If a slave uses SYNC, we are dealing with an old implementation
          * of the replication protocol (like redis-cli --slave). Flag the client
-         * so that we don't expect to receive REPLCONF ACK feedbacks. */
+         * so that we don't expect to receive REPLCONF ACK feedbacks.
+         *
+         * 中文补充：客户端使用旧的 SYNC 协议。这类 replica 不会发送 REPLCONF ACK，
+         * 所以标记为 CLIENT_PRE_PSYNC。 */
         c->flags |= CLIENT_PRE_PSYNC;
     }
 
-    /* Full resynchronization. */
+    /* Full resynchronization.
+     * 中文补充：走到这里说明必须执行 full resynchronization。 */
     server.stat_sync_full++;
 
     /* Setup the slave as one waiting for BGSAVE to start. The following code
-     * paths will change the state if we handle the slave differently. */
+     * paths will change the state if we handle the slave differently.
+     *
+     * 中文补充：先把 replica 放入 WAIT_BGSAVE_START。后面根据当前是否已有 BGSAVE、
+     * BGSAVE 类型、是否可复用等条件，再把状态推进到 WAIT_BGSAVE_END 或保持等待下一次 BGSAVE。 */
     c->replstate = SLAVE_STATE_WAIT_BGSAVE_START;
     if (server.repl_disable_tcp_nodelay)
-        connDisableTcpNoDelay(c->conn); /* Non critical if it fails. */
+        connDisableTcpNoDelay(c->conn); /* Non critical if it fails. 中文补充：非关键优化，失败也不影响复制正确性。 */
     c->repldbfd = -1;
     c->flags |= CLIENT_SLAVE;
     listAddNodeTail(server.slaves,c);
 
-    /* Create the replication backlog if needed. */
+    /* Create the replication backlog if needed.
+     *
+     * 中文补充：full sync 期间产生的新命令需要进入 replication backlog，
+     * 这样 RDB 之后可以继续把增量命令发给 replica。 */
     createReplicationBacklogIfNeeded();
 
     /* Keep the client in the main thread to avoid data races between the
      * connWrite call in startBgsaveForReplication and the client's event
-     * handler in IO threads. */
+     * handler in IO threads.
+     *
+     * 中文补充：startBgsaveForReplication() 里可能直接 connWrite() 回复 replica。
+     * 为避免 IO 线程中的 client handler 和主线程写同一连接产生数据竞争，
+     * 这里强制把 replica client 留在主线程。 */
     if (c->tid != IOTHREAD_MAIN_THREAD_ID) keepClientInMainThread(c);
 
-    /* CASE 1: BGSAVE is in progress, with disk target. */
+    /* CASE 1: BGSAVE is in progress, with disk target.
+     * 中文补充：当前已经有一个写磁盘文件的 RDB BGSAVE。 */
     if (server.child_type == CHILD_TYPE_RDB &&
         server.rdb_child_type == RDB_CHILD_TYPE_DISK)
     {
         /* Ok a background save is in progress. Let's check if it is a good
          * one for replication, i.e. if there is another slave that is
-         * registering differences since the server forked to save. */
+         * registering differences since the server forked to save.
+         *
+         * 中文补充：如果已有 BGSAVE 可复用，就不必重新 fork。但只有在已有某个 replica
+         * 正在等待该 BGSAVE 完成，并且 master 已经为它记录了 BGSAVE 期间的增量命令时，
+         * 新 replica 才能安全挂到同一次 BGSAVE 上。 */
         client *slave;
         listNode *ln;
         listIter li;
@@ -1347,7 +1459,10 @@ void syncCommand(client *c) {
         while((ln = listNext(&li))) {
             slave = ln->value;
             /* If the client needs a buffer of commands, we can't use
-             * a replica without replication buffer. */
+             * a replica without replication buffer.
+             *
+             * 中文补充：如果新 replica 需要后续命令 buffer，就不能挂到一个 RDB-only replica 上，
+             * 因为 RDB-only replica 不保存 RDB 后的增量输出缓冲。 */
             if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_END &&
                 (!(slave->flags & CLIENT_REPL_RDBONLY) ||
                  (c->flags & CLIENT_REPL_RDBONLY)))
@@ -1355,46 +1470,70 @@ void syncCommand(client *c) {
         }
         /* To attach this slave, we check that it has at least all the
          * capabilities of the slave that triggered the current BGSAVE
-         * and its exact requirements. */
+         * and its exact requirements.
+         *
+         * 中文补充：复用当前 BGSAVE 还要求能力和 RDB 请求完全兼容：
+         * - 新 replica 至少具备触发当前 BGSAVE 的 replica 的能力；
+         * - RDB 请求类型必须相同，例如是否 filtered / rdb-only。 */
         if (ln && ((c->slave_capa & slave->slave_capa) == slave->slave_capa) &&
             c->slave_req == slave->slave_req) {
             /* Perfect, the server is already registering differences for
              * another slave. Set the right state, and copy the buffer.
-             * We don't copy buffer if clients don't want. */
+             * We don't copy buffer if clients don't want.
+             *
+             * 中文补充：可以复用当前 BGSAVE。如果新 replica 需要命令流，就复制已有 replica 的输出缓冲，
+             * 这样它也能拿到 BGSAVE fork 之后产生的增量命令。 */
             if (!(c->flags & CLIENT_REPL_RDBONLY))
                 copyReplicaOutputBuffer(c,slave);
             replicationSetupSlaveForFullResync(c,slave->psync_initial_offset);
             serverLog(LL_NOTICE,"Waiting for end of BGSAVE for SYNC");
         } else {
             /* No way, we need to wait for the next BGSAVE in order to
-             * register differences. */
+             * register differences.
+             *
+             * 中文补充：不能复用当前 BGSAVE，只能等下一次 BGSAVE，
+             * 否则 replica 会缺失当前 BGSAVE fork 之后的增量命令。 */
             serverLog(LL_NOTICE,"Can't attach the replica to the current BGSAVE. Waiting for next BGSAVE for SYNC");
         }
 
-    /* CASE 2: BGSAVE is in progress, with socket target. */
+    /* CASE 2: BGSAVE is in progress, with socket target.
+     * 中文补充：当前已经有一个 socket/diskless 目标的 RDB BGSAVE。 */
     } else if (server.child_type == CHILD_TYPE_RDB &&
                server.rdb_child_type == RDB_CHILD_TYPE_SOCKET)
     {
         /* There is an RDB child process but it is writing directly to
          * children sockets. We need to wait for the next BGSAVE
-         * in order to synchronize. */
+         * in order to synchronize.
+         *
+         * 中文补充：diskless BGSAVE 的目标 replica socket 在 fork 前已经确定。
+         * 新来的 replica 不能中途加入当前 RDB child，只能等下一次 BGSAVE。 */
         serverLog(LL_NOTICE,"Current BGSAVE has socket target. Waiting for next BGSAVE for SYNC");
 
-    /* CASE 3: There is no BGSAVE is in progress. */
+    /* CASE 3: There is no BGSAVE is in progress.
+     * 中文补充：当前没有 RDB BGSAVE。 */
     } else {
         if (server.repl_diskless_sync && (c->slave_capa & SLAVE_CAPA_EOF) &&
             server.repl_diskless_sync_delay)
         {
             /* Diskless replication RDB child is created inside
              * replicationCron() since we want to delay its start a
-             * few seconds to wait for more slaves to arrive. */
+             * few seconds to wait for more slaves to arrive.
+             *
+             * 中文补充：diskless sync 支持延迟启动。这里先不立刻 fork，而是等待
+             * repl-diskless-sync-delay，让更多 replica 在同一批次里一起 full sync，减少 fork 次数。 */
             serverLog(LL_NOTICE,"Delay next BGSAVE for diskless SYNC");
         } else {
             /* We don't have a BGSAVE in progress, let's start one. Diskless
-             * or disk-based mode is determined by replica's capacity. */
+             * or disk-based mode is determined by replica's capacity.
+             *
+             * 中文补充：没有可复用的 BGSAVE，也不需要延迟，就立即启动一次 replication BGSAVE。
+             * startBgsaveForReplication() 会根据配置和 replica capability 决定
+             * 使用 disk-based 还是 diskless/socket 目标。 */
             if (!hasActiveChildProcess()) {
                 startBgsaveForReplication(c->slave_capa, c->slave_req);
             } else {
+                /* 当前没有 RDB BGSAVE，但可能有 AOF rewrite 等其他子进程，
+                 * Redis 同一时间不能随意启动多个冲突的子进程，所以延后。 */
                 serverLog(LL_NOTICE,
                     "No BGSAVE in progress, but another BG operation is active. "
                     "BGSAVE for replication delayed");
@@ -1812,16 +1951,23 @@ void sendBulkToSlave(connection *conn) {
 }
 
 /* Remove one write handler from the list of connections waiting to be writable
- * during rdb pipe transfer. */
+ * during rdb pipe transfer.
+ * 中文补充：在 RDB pipe 传输期间，从“等待 socket 可写”的连接列表里移除一个 write handler。 */
 void rdbPipeWriteHandlerConnRemoved(struct connection *conn) {
+    /* 这个回调有可能在 write handler 已经被清理之后再次进入。 */
     if (!connHasWriteHandler(conn))
         return;
+    /* 这个 replica 已经没有当前 pipe buffer 里的待写数据了。 */
     connSetWriteHandler(conn, NULL);
     client *slave = connGetPrivateData(conn);
+    /* 清空 full sync 超时检查使用的时间戳。 */
     slave->repl_last_partial_write = 0;
+    /* 少了一个阻塞父进程继续读取 RDB pipe 的 replica。 */
     server.rdb_pipe_numconns_writing--;
-    /* if there are no more writes for now for this conn, or write error: */
+    /* if there are no more writes for now for this conn, or write error:
+     * 中文补充：如果当前已经没有待写 socket，或者遇到写错误。 */
     if (server.rdb_pipe_numconns_writing == 0) {
+        /* 所有挂起的 socket 写入都完成了，可以恢复读取 RDB 子进程 pipe。 */
         if (aeCreateFileEvent(server.el, server.rdb_pipe_read, AE_READABLE, rdbPipeReadHandler,NULL) == AE_ERR) {
             serverPanic("Unrecoverable error creating server.rdb_pipe_read file event.");
         }
@@ -1829,48 +1975,64 @@ void rdbPipeWriteHandlerConnRemoved(struct connection *conn) {
 }
 
 /* Called in diskless master during transfer of data from the rdb pipe, when
- * the replica becomes writable again. */
+ * the replica becomes writable again.
+ * 中文补充：diskless master 正在传输 RDB pipe 数据时，某个 replica socket 重新变得可写后调用。 */
 void rdbPipeWriteHandler(struct connection *conn) {
+    /* 只有 rdbPipeReadHandler 已经把数据放进共享 buffer 后，才会存在这个 write handler。 */
     serverAssert(server.rdb_pipe_bufflen>0);
     client *slave = connGetPrivateData(conn);
     ssize_t nwritten;
+    /* 继续把 server.rdb_pipe_buff 中尚未写出的后半段写给这个 replica。 */
     if ((nwritten = connWrite(conn, server.rdb_pipe_buff + slave->repldboff,
                               server.rdb_pipe_bufflen - slave->repldboff)) == -1)
     {
+        /* 连接仍然正常说明只是 socket 暂时还不够可写，等待下一次可写事件。 */
         if (connGetState(conn) == CONN_STATE_CONNECTED)
             return; /* equivalent to EAGAIN */
+        /* 真正的连接错误会让这个 replica 退出本次 diskless 传输。 */
         serverLog(LL_WARNING,"Write error sending DB to replica: %s",
             connGetLastError(conn));
         freeClient(slave);
         return;
     } else {
+        /* 推进这个 replica 在当前共享 pipe buffer 里的写入偏移。 */
         slave->repldboff += nwritten;
         atomicIncr(server.stat_net_repl_output_bytes, nwritten);
         if (slave->repldboff < server.rdb_pipe_bufflen) {
+            /* 只写入了一部分：记录最近一次卡住的时间，供 repl-timeout 处理使用。 */
             slave->repl_last_partial_write = server.unixtime;
             return; /* more data to write.. */
         }
     }
+    /* 当前共享 pipe buffer 已经完整写给这个 replica，它不再阻塞继续读 pipe。 */
     rdbPipeWriteHandlerConnRemoved(conn);
 }
 
-/* Called in diskless master, when there's data to read from the child's rdb pipe */
+/* Called in diskless master, when there's data to read from the child's rdb pipe.
+ * 中文补充：diskless master 收到 RDB 子进程 pipe 可读事件时调用。 */
 void rdbPipeReadHandler(struct aeEventLoop *eventLoop, int fd, void *clientData, int mask) {
+    /* 这里不需要 event loop 参数；fd 是 RDB 子进程 pipe 的读端。 */
     UNUSED(mask);
     UNUSED(clientData);
     UNUSED(eventLoop);
     int i;
+    /* 懒加载共享临时 buffer，每次从 pipe 读数据都复用它。 */
     if (!server.rdb_pipe_buff)
         server.rdb_pipe_buff = zmalloc(PROTO_IOBUF_LEN);
+    /* 旧 buffer 还有 replica 没写完时，父进程不能继续读取新的 pipe 数据。 */
     serverAssert(server.rdb_pipe_numconns_writing==0);
 
     while (1) {
+        /* 读取 RDB 子进程产生的下一段 RDB 数据。 */
         server.rdb_pipe_bufflen = read(fd, server.rdb_pipe_buff, PROTO_IOBUF_LEN);
         if (server.rdb_pipe_bufflen < 0) {
+            /* 当前暂时没有数据可读，等待下一次 readable 事件。 */
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 return;
+            /* 真正的 pipe 读取错误表示所有 replica 都无法继续这次传输。 */
             serverLog(LL_WARNING,"Diskless rdb transfer, read error sending DB to replicas: %s", strerror(errno));
             for (i=0; i < server.rdb_pipe_numconns; i++) {
+                /* 断开所有参与本次 diskless RDB 传输的 replica。 */
                 connection *conn = server.rdb_pipe_conns[i];
                 if (!conn)
                     continue;
@@ -1878,25 +2040,32 @@ void rdbPipeReadHandler(struct aeEventLoop *eventLoop, int fd, void *clientData,
                 freeClient(slave);
                 server.rdb_pipe_conns[i] = NULL;
             }
+            /* 父进程已经无法消费子进程的 RDB 输出，因此杀掉 RDB 子进程。 */
             killRDBChild();
             return;
         }
 
         if (server.rdb_pipe_bufflen == 0) {
-            /* EOF - write end was closed. */
+            /* EOF - write end was closed.
+             * 中文补充：RDB 子进程关闭了 pipe 写端。 */
             int stillUp = 0;
+            /* 子进程已经关闭 pipe，不再需要监听 readable 事件。 */
             aeDeleteFileEvent(server.el, server.rdb_pipe_read, AE_READABLE);
             for (i=0; i < server.rdb_pipe_numconns; i++)
             {
+                /* 统计有多少 replica 一直存活到 RDB pipe 结束。 */
                 connection *conn = server.rdb_pipe_conns[i];
                 if (!conn)
                     continue;
                 stillUp++;
             }
             serverLog(LL_NOTICE,"Diskless rdb transfer, done reading from pipe, %d replicas still up.", stillUp);
-            /* Now that the replicas have finished reading, notify the child that it's safe to exit. 
+            /* Now that the replicas have finished reading, notify the child that it's safe to exit.
              * When the server detects the child has exited, it can mark the replica as online, and
-             * start streaming the replication buffers. */
+             * start streaming the replication buffers.
+             *
+             * 中文补充：replica 已经读完 RDB，通知子进程可以安全退出。master 检测到子进程退出后，
+             * 就可以把 replica 标记为 online，并开始发送后续 replication buffer。 */
             close(server.rdb_child_exit_pipe);
             server.rdb_child_exit_pipe = -1;
             return;
@@ -1905,50 +2074,70 @@ void rdbPipeReadHandler(struct aeEventLoop *eventLoop, int fd, void *clientData,
         int stillAlive = 0;
         for (i=0; i < server.rdb_pipe_numconns; i++)
         {
+            /* 把刚读到的 RDB 数据块分发给本次传输中仍然存在的每个 replica。 */
             ssize_t nwritten;
             connection *conn = server.rdb_pipe_conns[i];
             if (!conn)
                 continue;
 
             client *slave = connGetPrivateData(conn);
+            /* 尝试把当前 buffer 完整写入这个 replica 的 socket。 */
             if ((nwritten = connWrite(conn, server.rdb_pipe_buff, server.rdb_pipe_bufflen)) == -1) {
                 if (connGetState(conn) != CONN_STATE_CONNECTED) {
+                    /* replica 已断开，或者遇到了真正的 socket 错误。 */
                     serverLog(LL_WARNING,"Diskless rdb transfer, write error sending DB to replica: %s",
                         connGetLastError(conn));
                     freeClient(slave);
+                    /* 置空表示这个 replica 已经离开，后续循环和日志统计会跳过它。 */
                     server.rdb_pipe_conns[i] = NULL;
                     continue;
                 }
-                /* An error and still in connected state, is equivalent to EAGAIN */
+                /* An error and still in connected state, is equivalent to EAGAIN.
+                 * 中文补充：发生错误但连接仍然正常，等价于 EAGAIN。 */
+                /* 当前 buffer 一个字节都没写出去，之后从偏移 0 重新尝试。 */
                 slave->repldboff = 0;
             } else {
                 /* Note: when use diskless replication, 'repldboff' is the offset
-                 * of 'rdb_pipe_buff' sent rather than the offset of entire RDB. */
+                 * of 'rdb_pipe_buff' sent rather than the offset of entire RDB.
+                 *
+                 * 中文补充：diskless replication 中，repldboff 表示当前 rdb_pipe_buff
+                 * 已发送的偏移，而不是整个 RDB 文件的偏移。 */
+                /* 记录这个 replica 已经收到当前共享 buffer 的多少字节。 */
                 slave->repldboff = nwritten;
                 atomicIncr(server.stat_net_repl_output_bytes, nwritten);
             }
             /* If we were unable to write all the data to one of the replicas,
-             * setup write handler (and disable pipe read handler, below) */
+             * setup write handler (and disable pipe read handler, below).
+             *
+             * 中文补充：如果没能把当前数据完整写给某个 replica，
+             * 就为它设置 write handler，并在下面禁用 pipe read handler。 */
             if (nwritten != server.rdb_pipe_bufflen) {
+                /* 现在由这个 replica 决定父进程什么时候可以继续读 pipe。 */
                 slave->repl_last_partial_write = server.unixtime;
                 server.rdb_pipe_numconns_writing++;
                 connSetWriteHandler(conn, rdbPipeWriteHandler);
             }
+            /* 这个 replica 仍然属于本次 diskless 传输。 */
             stillAlive++;
         }
 
         if (stillAlive == 0) {
+            /* 处理当前数据块时所有 replica 都已经离开，没有人再需要子进程输出。 */
             serverLog(LL_WARNING,"Diskless rdb transfer, last replica dropped, killing fork child.");
-            /* Avoid deleting events after killRDBChild as it may trigger new bgsaves for other replicas. */
+            /* Avoid deleting events after killRDBChild as it may trigger new bgsaves for other replicas.
+             * 中文补充：先删除事件再 killRDBChild，避免 killRDBChild 触发其他 replica 的新 bgsave 后误删事件。 */
             aeDeleteFileEvent(server.el, server.rdb_pipe_read, AE_READABLE); 
             killRDBChild();
             break;
         }
-        /* Remove the pipe read handler if at least one write handler was set. */
+        /* Remove the pipe read handler if at least one write handler was set.
+         * 中文补充：只要设置了至少一个 write handler，就先移除 pipe read handler。 */
         else if (server.rdb_pipe_numconns_writing) {
+            /* 保持共享 buffer 不变，直到所有挂起的 write handler 都写完它。 */
             aeDeleteFileEvent(server.el, server.rdb_pipe_read, AE_READABLE);
             break;
         }
+        /* 否则说明所有 replica 都接受了当前数据块，继续循环读取下一块。 */
     }
 }
 
