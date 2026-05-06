@@ -4393,18 +4393,41 @@ void killRDBChild(void) {
 
 /* Spawn an RDB child that writes the RDB to the sockets of the slaves
  * that are currently in SLAVE_STATE_WAIT_BGSAVE_START state. */
+/* 中文补充：fork 一个 RDB 子进程，把生成的 RDB 直接发给所有处于
+ * SLAVE_STATE_WAIT_BGSAVE_START 的 replica，即"无盘 (diskless) 全量同步"。
+ * RDB 不会落到磁盘，而是经由两条路径之一送达 replica：
+ *   1) 经典模式：子进程把字节写到匿名 pipe，父进程从 pipe 读再 fan-out
+ *      到每个 replica socket（兼容 TLS：socket 的加密上下文属于父进程，
+ *      不能让 fork 出来的子进程持有）。
+ *   2) rdb-channel 模式：子进程通过 connset 直接写 replica socket，每个
+ *      replica 拿到一份独立的 RDB 流（无 TLS 接管问题，吞吐更高）。
+ * 入参 req 携带本批 replica 的能力/需求位（SLAVE_REQ_*）；rsi 用于把
+ * master 的 replication ID/offset、当前 selected db 等元信息写进 RDB 头。
+ * 返回 C_OK 表示子进程已成功 fork；C_ERR 表示无法启动，调用方需把
+ * replica 状态回滚到 WAIT_BGSAVE_START 等待下一轮。 */
 int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
     listNode *ln;
     listIter li;
     pid_t childpid;
     int pipefds[2], rdb_pipe_write = 0, safe_to_exit_pipe = 0;
+    /* 中文补充：rdb_channel == 1 表示走 rdb-channel 复制。需要同时满足：
+     *   (a) master 配置 repl-rdb-channel=yes；
+     *   (b) 当前这批 replica 在握手时声明了 SLAVE_REQ_RDB_CHANNEL 能力。 */
     int rdb_channel = server.repl_rdb_channel && (req & SLAVE_REQ_RDB_CHANNEL);
+    /* 中文补充：slots_req == 1 表示这是 cluster 槽位迁移的快照请求；
+     * 仅用于日志区分，子进程内会改走 slotSnapshotSaveRio。 */
     int slots_req = req & SLAVE_REQ_SLOTS_SNAPSHOT;
 
+    /* 中文补充：互斥保证 —— 已有任何子进程（RDB / AOFRW / Module fork）
+     * 在跑就直接失败返回。同时 fork 多个 child 会成倍放大 COW 内存并
+     * 互相竞争 CPU/IO。调用方（replicationCron）会在下一轮重试。 */
     if (hasActiveChildProcess()) return C_ERR;
 
     /* Even if the previous fork child exited, don't start a new one until we
      * drained the pipe. */
+    /* 中文补充：上一轮 RDB 子进程哪怕已经退出，只要父进程还没把 pipe 中
+     * 残余字节读完并释放掉 server.rdb_pipe_conns，本轮就不能开始 ——
+     * 否则新旧两批 replica 的 RDB 字节流会在 pipe 上串接到一起。 */
     if (server.rdb_pipe_conns) return C_ERR;
 
     if (!rdb_channel) {
@@ -4412,12 +4435,22 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
          * the parent, we can't let it write directly to the sockets, since in case
          * of TLS we must let the parent handle a continuous TLS state when the
          * child terminates and parent takes over. */
+        /* 中文补充：经典 diskless 模式 —— 创建一条匿名 pipe 作为"子进程
+         * 写 RDB → 父进程读 → 父进程 fan-out 到 replica socket"的中转。
+         * pipe 读端设为 O_NONBLOCK，便于父进程在主事件循环里非阻塞读取
+         * （rdbPipeReadHandler）。 */
         if (anetPipe(pipefds, O_NONBLOCK, 0) == -1) return C_ERR;
         server.rdb_pipe_read = pipefds[0]; /* read end */
         rdb_pipe_write = pipefds[1]; /* write end */
 
         /* create another pipe that is used by the parent to signal to the child
          * that it can exit. */
+        /* 中文补充：第二条 pipe 用于"安全退出握手"。子进程写完 RDB 后不
+         * 能立刻 exit —— 父进程可能还没把 pipe 中最后一段字节 fan-out 给
+         * 所有 replica。父进程把全部数据转发完成后，再关闭 rdb_child_exit_pipe
+         * 的写端，子进程在 safe_to_exit_pipe 上的 read 收到 EOF 才允许退出。
+         * 这样可以保证全量同步收尾干净，避免子进程过早退出导致 cron
+         * 误以为 fullsync 已经结束。 */
         if (anetPipe(pipefds, 0, 0) == -1) {
             close(rdb_pipe_write);
             close(server.rdb_pipe_read);
@@ -4429,6 +4462,11 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
 
     /* Collect the connections of the replicas we want to transfer
      * the RDB to, which are in WAIT_BGSAVE_START state. */
+    /* 中文补充：扫描 server.slaves，挑出本轮要"搭车"同步的 replica：
+     *   - replstate == WAIT_BGSAVE_START（还没分配 RDB 来源）；
+     *   - slave_req 与本次 req 完全相同（要求/能力位一致才能共享同一份 RDB）。
+     * conns 容量按 server.slaves 总数预分配，简单且不会越界；多出来的
+     * 槽位会留空（对齐到 numconns 即可）。 */
     int numconns = 0;
     connection **conns = zmalloc(sizeof(*conns) * listLength(server.slaves));
     listRewind(server.slaves,&li);
@@ -4438,10 +4476,18 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
             /* Check slave has the exact requirements */
             if (slave->slave_req != req)
                 continue;
+            /* 中文补充：把 replica 状态推进到 WAIT_BGSAVE_END，并发送
+             * "+FULLRESYNC <replid> <offset>\r\n"，让 replica 知道本次
+             * 全量同步的初始 offset，从此 master_repl_offset 开始累加。
+             * 在这里，slave被设置SLAVE_STATE_WAIT_BGSAVE_END
+             */
             replicationSetupSlaveForFullResync(slave, getPsyncInitialOffset());
             conns[numconns++] = slave->conn;
             if (rdb_channel) {
                 /* Put the socket in blocking mode to simplify RDB transfer. */
+                /* 中文补充：rdb-channel 模式下子进程会以阻塞写方式把 RDB
+                 * 直接灌进 socket，因此这里把 socket 切成阻塞，并设置发送
+                 * 超时为 repl-timeout 秒，避免某个 replica 卡死永远拖住子进程。 */
                 connSendTimeout(slave->conn, server.repl_timeout * 1000);
                 connBlock(slave->conn);
             }
@@ -4449,23 +4495,39 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
     }
 
     if (!rdb_channel) {
+        /* 中文补充：经典 diskless（pipe）模式下，把 conns 数组挂到 server，
+         * 父进程的 rdbPipeReadHandler 之后会从 pipe 读到字节再 fan-out 给
+         * 这批 conns。numconns_writing 跟踪当前有多少 replica 还有未发完
+         * 的字节，用于在 pipe 读端做反压（背压）/ 流控。 */
         server.rdb_pipe_conns = conns;
         server.rdb_pipe_numconns = numconns;
         server.rdb_pipe_numconns_writing = 0;
     }
 
     /* Create the child process. */
+    /* 中文补充：redisFork 封装了 setrlimit、fork 计时、CHILD_TYPE 标记
+     * 等公共逻辑；返回 0 进入子进程分支，>0 是父进程拿到的 child pid，
+     * -1 表示 fork 失败（一般是内存或资源限制）。 */
     if ((childpid = redisFork(CHILD_TYPE_RDB)) == 0) {
         /* Child */
+        /* 中文补充：======== 子进程分支 ======== */
         int retval, dummy;
         rio rdb;
 
         if (rdb_channel) {
+            /* 中文补充：rdb-channel：把 conns 数组直接当成 rio 的输出端，
+             * 子进程内部用 rioWriteConnset 一次写多份 —— 每个 replica
+             * 拿到一份独立的完整 RDB，互不干扰。 */
             rioInitWithConnset(&rdb, conns, numconns);
         } else {
+            /* 中文补充：经典 diskless：rio 的输出端是 pipe 写端，所有 replica
+             * 共享同一份 RDB 字节流（由父进程读出后 fan-out）。 */
             rioInitWithFd(&rdb,rdb_pipe_write);
             /* Close the reading part, so that if the parent crashes, the child
              * will get a write error and exit. */
+            /* 中文补充：子进程立即关闭 pipe 读端 —— 这样父进程一旦异常退出，
+             * 子进程下一次 write 会收到 EPIPE/SIGPIPE，可以及时发现并自杀，
+             * 不会变成"孤儿"白白消耗 CPU/内存。 */
             close(server.rdb_pipe_read);
         }
 
@@ -4474,6 +4536,9 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
 
         /* Disable RDB compression and checksum in the fork child if requested.
          * The parent's configuration is not affected. */
+        /* 中文补充：以下两个开关只改子进程的 server 副本（COW），不影响
+         * 父进程行为。无盘加载场景下 replica 不需要 RDB 落地校验、压缩
+         * 也是浪费 CPU，因此可按需关闭。 */
         if (req & SLAVE_REQ_RDB_NO_COMPRESS)
             server.rdb_compression = 0;
         if (req & SLAVE_REQ_RDB_NO_CHECKSUM)
@@ -4481,35 +4546,60 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
 
         if (req & SLAVE_REQ_SLOTS_SNAPSHOT) {
             /* Slots snapshot is required */
+            /* 中文补充：cluster 槽位迁移走 slotSnapshotSaveRio：只序列化
+             * 指定槽范围内的 key，并附带 CLUSTER SYNCSLOTS 控制命令。 */
             retval = slotSnapshotSaveRio(req, &rdb, NULL);
         } else {
+            /* 中文补充：标准 RDB —— 写完后追加 EOF mark，replica 据此识别
+             * 流的结束（pipe/socket 没有显式长度头）。 */
             retval = rdbSaveRioWithEOFMark(req,&rdb,NULL,rsi);
         }
 
+        /* 中文补充：rioFlush 把 rio 内部 buffer 全部写出去；如果之前 retval
+         * 已经成功但这次 flush 报错（写 pipe/socket 失败），就把整体结果
+         * 改成失败，否则父进程会以为同步成功了。 */
         if (retval == C_OK && rioFlush(&rdb) == 0)
             retval = C_ERR;
 
         if (retval == C_OK) {
+            /* 中文补充：上报 fork 期间累计的 COW（写时复制）内存大小，
+             * 用于 INFO persistence 的 rdb_last_cow_size 等指标。 */
             sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
         }
 
         if (rdb_channel) {
+            /* 中文补充：rdb-channel 直连 socket，子进程退出前只需释放
+             * connset 即可（不存在父进程"接管 TLS"那一步）。 */
             rioFreeConnset(&rdb);
         } else {
             rioFreeFd(&rdb);
             /* wake up the reader, tell it we're done. */
+            /* 中文补充：关闭 pipe 写端，触发父进程读端 EOF —— 父进程因此
+             * 知道 RDB 已经写完，可以进入"残余 buffer 排空+收尾"流程。 */
             close(rdb_pipe_write);
             close(server.rdb_child_exit_pipe); /* close write end so that we can detect the close on the parent. */
             /* hold exit until the parent tells us it's safe. we're not expecting
              * to read anything, just get the error when the pipe is closed. */
+            /* 中文补充：阻塞 read 直到 safe_to_exit_pipe 被父进程关闭。
+             * 这条 read 永远不会真的读到字节，read 返回 0/失败即可 ——
+             * 这就是上文提到的"安全退出握手"：父进程把 pipe 里所有字节
+             * 转发给 replica、并准备好接管后续命令流之后，才会关闭这一端。 */
             dummy = read(safe_to_exit_pipe, pipefds, 1);
             UNUSED(dummy);
         }
         zfree(conns);
+        /* 中文补充：用 exitFromChild 而不是 _exit/abort，统一处理 mem
+         * sanitizer / log flush / 单元测试钩子等。退出码 0=成功、1=失败，
+         * 父进程通过 wait() 拿到这个状态判断同步是否成功。 */
         exitFromChild((retval == C_OK) ? 0 : 1, 0);
     } else {
         /* Parent */
+        /* 中文补充：======== 父进程分支 ======== */
         if (childpid == -1) {
+            /* 中文补充：fork 失败 —— 通常是内存吃紧 / vm.overcommit 限制 /
+             * fd 用尽。需要把刚才被 replicationSetupSlaveForFullResync
+             * 推进到 WAIT_BGSAVE_END 的 replica 全部回退到 WAIT_BGSAVE_START，
+             * 让 replicationCron 下一次 tick 再尝试。 */
             serverLog(LL_WARNING,"Can't save in background: fork: %s",
                 strerror(errno));
 
@@ -4525,6 +4615,10 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
             }
 
             if (!rdb_channel)  {
+                /* 中文补充：fork 失败时把刚刚开的两条 pipe（数据 pipe +
+                 * 安全退出 pipe）所有 fd 关闭，并清空 server.rdb_pipe_conns，
+                 * 否则下次进入函数开头的 `if (server.rdb_pipe_conns)` 检查
+                 * 会一直为真，把后续合法 fork 也卡住。 */
                 close(rdb_pipe_write);
                 close(server.rdb_pipe_read);
                 close(server.rdb_child_exit_pipe);
@@ -4534,18 +4628,32 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
                 server.rdb_pipe_numconns_writing = 0;
             }
         } else {
+            /* 中文补充：fork 成功路径。日志里区分了三种目标，便于运维定位
+             * 是哪条全量同步通路：rdb-channel 普通 / rdb-channel 集群槽迁移 /
+             * 经典 pipe 模式。 */
             serverLog(LL_NOTICE, "Background RDB transfer started by pid %ld to %s", (long)childpid,
                 rdb_channel ? (slots_req ? "slot migration destination socket" : "replica socket") :
                               "parent process pipe");
             server.rdb_save_time_start = time(NULL);
+            /* 中文补充：标记当前 RDB 子进程的目标类型为 SOCKET（无盘）。
+             * replicationCron 会根据这个值判断 timeout 应当作用于哪些
+             * replica 状态（参见 SLAVE_STATE_WAIT_BGSAVE_END +
+             * RDB_CHILD_TYPE_SOCKET 那一段断开超时 replica 的逻辑）。 */
             server.rdb_child_type = RDB_CHILD_TYPE_SOCKET;
             if (!rdb_channel) {
                 close(rdb_pipe_write); /* close write in parent so that it can detect the close on the child. */
+                /* 中文补充：父进程关闭 pipe 写端 —— 之后 pipe 上只剩
+                 * "子进程写 / 父进程读"一对引用，子进程关闭写端时父进程
+                 * 读端能立刻拿到 EOF。然后注册可读事件 rdbPipeReadHandler，
+                 * 让事件循环非阻塞地把字节 fan-out 到所有 replica socket。 */
                 if (aeCreateFileEvent(server.el, server.rdb_pipe_read, AE_READABLE, rdbPipeReadHandler,NULL) == AE_ERR) {
                     serverPanic("Unrecoverable error creating server.rdb_pipe_read file event.");
                 }
             }
         }
+        /* 中文补充：rdb-channel 路径下父进程已经不需要 conns 数组了
+         * （子进程已经把 socket 拿去写）；非 channel 路径已经把它转交给
+         * server.rdb_pipe_conns，因此这里仅关闭 safe_to_exit_pipe 的读端。 */
         if (rdb_channel)
             zfree(conns);
         else
