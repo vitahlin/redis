@@ -747,6 +747,10 @@ proc get_proc_job {pid} {
     }
 }
 
+proc process_is_paused {pid} {
+    return [string match "T*" [get_proc_state $pid]]
+}
+
 proc pause_process {pid} {
     exec kill -SIGSTOP $pid
     wait_for_condition 50 100 {
