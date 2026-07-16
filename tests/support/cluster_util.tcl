@@ -15,6 +15,9 @@
 if {[info command redis_cluster] eq {}} {
     source tests/support/cluster.tcl
 }
+if {[info command rediscli_tls_config] eq {}} {
+    source tests/support/cli.tcl
+}
 
 # Cluster helper functions
 proc config_set_all_nodes {keyword value} {
@@ -161,14 +164,74 @@ proc wait_for_cluster_size {cluster_size} {
     }
 }
 
-# Check that cluster nodes agree about "state", or raise an error.
-proc wait_for_cluster_state {state} {
+proc cluster_secrets_consistent {{excluded_ids {}}} {
+    set secrets {}
     for {set j 0} {$j < [llength $::servers]} {incr j} {
+        if {[lsearch -exact $excluded_ids $j] >= 0} continue
+        lappend secrets [R $j debug internal_secret]
+    }
+    expr {[llength [lsort -unique $secrets]] <= 1}
+}
+
+# Check that the available cluster nodes agree about "state", or raise an
+# error. Tests that intentionally stop nodes can pass their instance IDs in
+# excluded_ids.
+proc wait_for_cluster_state {state {excluded_ids {}}} {
+    for {set j 0} {$j < [llength $::servers]} {incr j} {
+        if {[lsearch -exact $excluded_ids $j] >= 0} continue
         wait_for_condition 1000 50 {
             [CI $j cluster_state] eq $state
         } else {
             fail "Cluster node $j cluster_state:[CI $j cluster_state]"
         }
+    }
+
+    # The legacy cluster runner treated secret convergence as part of reaching
+    # a cluster state. Preserve that guarantee for the available nodes.
+    wait_for_condition 50 100 {
+        [cluster_secrets_consistent $excluded_ids]
+    } else {
+        fail "Failed waiting for cluster secrets to sync"
+    }
+}
+
+# Stop and restart cluster nodes while keeping their normal-framework server
+# definitions in place. Instance ID 0 is the innermost server, ID 1 is the
+# next outer server, and so on.
+proc cluster_kill_node {id} {
+    set level [expr {-$id}]
+    set server [get_srv $level]
+    set pid [dict get $server pid]
+    if {![is_alive $pid]} {
+        error "Cluster node $id is already stopped"
+    }
+    kill_server $server
+    # kill_server receives the server dictionary by value and closes its
+    # client. Remove that now-invalid handle from the copy retained by the
+    # server stack so restart and cleanup cannot close it a second time.
+    dict unset server client
+    lset ::servers end+$level $server
+}
+
+proc cluster_restart_node {id} {
+    set level [expr {-$id}]
+    set pid [srv $level pid]
+    if {[is_alive $pid]} {
+        error "Cluster node $id is still running"
+    }
+    restart_server $level true false
+}
+
+# Wait until redis-cli agrees that the cluster configuration is stable.
+proc wait_for_cluster_stable {{id 0}} {
+    set addr "127.0.0.1:[srv [expr {-$id}] port]"
+    wait_for_condition 1000 50 {
+        [catch {
+            exec src/redis-cli --cluster check $addr \
+                {*}[rediscli_tls_config "./tests"]
+        }] == 0
+    } else {
+        fail "Cluster does not stabilize"
     }
 }
 
@@ -259,11 +322,17 @@ proc cluster_setup {masters replicas node_count slot_allocator replica_allocator
 }
 
 # Start a cluster with the given number of masters and replicas. Replicas
-# will be allocated to masters by round robin.
-proc start_cluster {masters replicas options code {slot_allocator continuous_slot_allocation} {replica_allocator default_replica_allocation}} {
+# will be allocated to masters by round robin. node_count is optional and may
+# be larger than masters + replicas when a test needs unassigned/spare nodes.
+proc start_cluster {masters replicas options code {slot_allocator continuous_slot_allocation} {replica_allocator default_replica_allocation} {node_count {}}} {
     set ::cluster_master_nodes $masters
     set ::cluster_replica_nodes $replicas
-    set node_count [expr $masters + $replicas]
+    set configured_node_count [expr {$masters + $replicas}]
+    if {$node_count eq {}} {
+        set node_count $configured_node_count
+    } elseif {$node_count < $configured_node_count} {
+        error "node_count ($node_count) must be at least masters + replicas ($configured_node_count)"
+    }
 
     # Set the final code to be the tests + cluster setup
     set code [list cluster_setup $masters $replicas $node_count $slot_allocator $replica_allocator $code]

@@ -53,7 +53,6 @@ test "Slaves are both able to receive and acknowledge writes" {
     assert {[R 0 wait 2 60000] == 2}
 }
 
-set paused_pid [srv 0 pid]
 test "Write data while slave #10 is paused and can't receive it" {
     # Stop the slave with a multi/exec transaction so that the master will
     # be killed as soon as it can accept writes again.
@@ -77,7 +76,7 @@ test "Write data while slave #10 is paused and can't receive it" {
     assert {[R 10 read] eq {OK OK}}
 
     # Kill the master so that a reconnection will not be possible.
-    pause_process $paused_pid
+    cluster_kill_node 0
 }
 
 test "Wait for instance #5 (and not #10) to turn into a master" {
@@ -93,14 +92,7 @@ test "Wait for the node #10 to return alive before ending the test" {
 }
 
 test "Cluster should eventually be up again" {
-    for {set j 0} {$j < [llength $::servers]} {incr j} {
-        if {[process_is_paused $paused_pid]} continue
-        wait_for_condition 1000 50 {
-            [CI $j cluster_state] eq "ok"
-        } else {
-            fail "Cluster node $j cluster_state:[CI $j cluster_state]"
-        }
-    }
+    wait_for_cluster_state ok {0}
 }
 
 test "Node #10 should eventually replicate node #5" {
@@ -164,6 +156,7 @@ proc master_detected {instances} {
 
 test "New Master down consecutively" {
     set instances [dict create 0 1 3 1 6 1 9 1 12 1 15 1]
+    set killed_ids {}
 
     set loops [expr {[dict size $instances]-1}]
     for {set i 0} {$i < $loops} {incr i} {
@@ -181,22 +174,15 @@ test "New Master down consecutively" {
 
         set instances [dict remove $instances $master_id]
 
-        set paused_pid [srv [expr $master_id * -1] pid]
-        pause_process $paused_pid
+        cluster_kill_node $master_id
+        lappend killed_ids $master_id
         wait_for_condition 1000 50 {
             [master_detected $instances]
         } else {
             fail "No failover detected when master $master_id fails"
         }
 
-        for {set j 0} {$j < [llength $::servers]} {incr j} {
-            if {[process_is_paused $paused_pid]} continue
-            wait_for_condition 1000 50 {
-                [CI $j cluster_state] eq "ok"
-            } else {
-                fail "Cluster node $j cluster_state:[CI $j cluster_state]"
-            }
-        }
+        wait_for_cluster_state ok $killed_ids
     }
 }
 

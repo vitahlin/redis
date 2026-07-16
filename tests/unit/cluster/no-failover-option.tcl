@@ -8,6 +8,10 @@ test "Cluster is up" {
     wait_for_cluster_state ok
 }
 
+test "Cluster is writable" {
+    cluster_write_test [srv 0 port]
+}
+
 test "Instance #5 is a slave" {
     assert {[s -5 role] eq {slave}}
 
@@ -30,29 +34,18 @@ test "The nofailover flag is propagated" {
         wait_for_condition 1000 50 {
             [cluster_has_flag [cluster_get_node_by_id $j $slave5_id] nofailover]
         } else {
-            fail "Instance $id can't see the nofailover flag of slave"
+            fail "Instance $j can't see the nofailover flag of slave"
         }
     }
 }
 
 test "Killing one master node" {
-    pause_process [srv 0 pid]
+    cluster_kill_node 0
 }
 
 test "Cluster should be still down after some time" {
-    wait_for_condition 1000 50 {
-        [CI 1 cluster_state] eq {fail} &&
-        [CI 2 cluster_state] eq {fail} &&
-        [CI 3 cluster_state] eq {fail} &&
-        [CI 4 cluster_state] eq {fail} &&
-        [CI 5 cluster_state] eq {fail} &&
-        [CI 6 cluster_state] eq {fail} &&
-        [CI 7 cluster_state] eq {fail} &&
-        [CI 8 cluster_state] eq {fail} &&
-        [CI 9 cluster_state] eq {fail}
-    } else {
-        fail "Cluster doesn't fail"
-    }
+    after 10000
+    wait_for_cluster_state fail {0}
 }
 
 test "Instance #5 is still a slave" {
@@ -60,7 +53,7 @@ test "Instance #5 is still a slave" {
 }
 
 test "Restarting the previously killed master node" {
-    resume_process [srv 0 pid]
+    cluster_restart_node 0
 }
 
 } ;# start_cluster

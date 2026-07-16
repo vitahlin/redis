@@ -18,13 +18,10 @@ foreach id $replica_ids {
     R $id config set cluster-replica-no-failover yes
 }
 
-set paused_pid [srv 0 pid]
-set paused_pid1 [srv -1 pid]
-set paused_pid2 [srv -2 pid]
 test "Killing majority of master nodes" {
-    pause_process $paused_pid
-    pause_process $paused_pid1
-    pause_process $paused_pid2
+    cluster_kill_node 0
+    cluster_kill_node 1
+    cluster_kill_node 2
 }
 
 foreach id $replica_ids {
@@ -32,16 +29,7 @@ foreach id $replica_ids {
 }
 
 test "Cluster should eventually be down" {
-    for {set j 0} {$j < [llength $::servers]} {incr j} {
-        if {[process_is_paused $paused_pid]} continue
-        if {[process_is_paused $paused_pid1]} continue
-        if {[process_is_paused $paused_pid2]} continue
-        wait_for_condition 1000 50 {
-            [CI $j cluster_state] eq "fail"
-        } else {
-            fail "Cluster node $j cluster_state:[CI $j cluster_state]"
-        }
-    }
+    wait_for_cluster_state fail {0 1 2}
 }
 
 test "Use takeover to bring slaves back" {
@@ -51,16 +39,7 @@ test "Use takeover to bring slaves back" {
 }
 
 test "Cluster should eventually be up again" {
-    for {set j 0} {$j < [llength $::servers]} {incr j} {
-        if {[process_is_paused $paused_pid]} continue
-        if {[process_is_paused $paused_pid1]} continue
-        if {[process_is_paused $paused_pid2]} continue
-        wait_for_condition 1000 50 {
-            [CI $j cluster_state] eq "ok"
-        } else {
-            fail "Cluster node $j cluster_state:[CI $j cluster_state]"
-        }
-    }
+    wait_for_cluster_state ok {0 1 2}
 }
 
 test "Cluster is writable" {
@@ -74,9 +53,9 @@ test "Instance #5, #6, #7 are now masters" {
 }
 
 test "Restarting the previously killed master nodes" {
-    resume_process $paused_pid
-    resume_process $paused_pid1
-    resume_process $paused_pid2
+    cluster_restart_node 0
+    cluster_restart_node 1
+    cluster_restart_node 2
 }
 
 test "Instance #0, #1, #2 gets converted into a slaves" {

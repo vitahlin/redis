@@ -4,7 +4,7 @@
 set old_singledb $::singledb
 set ::singledb 1
 
-tags {tls:skip external:skip cluster} {
+tags {external:skip cluster} {
 
 set base_conf [list cluster-enabled yes]
 start_multiple_servers 5 [list overrides $base_conf] {
@@ -140,6 +140,10 @@ test "Coverage: ASKING" {
 test "CLUSTER SLAVES and CLUSTER REPLICAS with zero replicas" {
     assert_equal {} [R 0 cluster slaves [R 0 CLUSTER MYID]]
     assert_equal {} [R 0 cluster replicas [R 0 CLUSTER MYID]]
+}
+
+test "CLUSTER FORGET with invalid node ID" {
+    assert_error {*ERR Unknown node*} {R 0 cluster forget 1}
 }
 
 } ;# stop servers

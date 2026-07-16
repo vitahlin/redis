@@ -34,7 +34,6 @@ test "Lower the slave validity factor of #5 to the value of 2" {
     assert {[R 5 config set cluster-slave-validity-factor 2] eq {OK}}
 }
 
-set paused_pid [srv 0 pid]
 test "Break master-slave link and prevent further reconnections" {
     # Stop the slave with a multi/exec transaction so that the master will
     # be killed as soon as it can accept writes again.
@@ -57,7 +56,7 @@ test "Break master-slave link and prevent further reconnections" {
     assert {[R 5 read] eq {OK OK}}
 
     # Kill the master so that a reconnection will not be possible.
-    pause_process $paused_pid
+    cluster_kill_node 0
 }
 
 test "Slave #5 is reachable and alive" {
@@ -70,14 +69,7 @@ test "Slave #5 should not be able to failover" {
 }
 
 test "Cluster should be down" {
-    for {set j 0} {$j < [llength $::servers]} {incr j} {
-        if {[process_is_paused $paused_pid]} continue
-        wait_for_condition 100 50 {
-            [CI $j cluster_state] eq "fail"
-        } else {
-            fail "Cluster node $j cluster_state:[CI $j cluster_state]"
-        }
-    }
+    wait_for_cluster_state fail {0}
 }
 
 } ;# start_cluster

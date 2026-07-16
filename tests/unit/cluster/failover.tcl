@@ -24,9 +24,8 @@ test "Instance #5 synced with the master" {
 
 set current_epoch [CI 1 cluster_current_epoch]
 
-set paused_pid [srv 0 pid]
 test "Killing one master node" {
-    pause_process $paused_pid
+    cluster_kill_node 0
 }
 
 test "Wait for failover" {
@@ -38,14 +37,7 @@ test "Wait for failover" {
 }
 
 test "Cluster should eventually be up again" {
-    for {set j 0} {$j < [llength $::servers]} {incr j} {
-        if {[process_is_paused $paused_pid]} continue
-        wait_for_condition 1000 50 {
-            [CI $j cluster_state] eq "ok"
-        } else {
-            fail "Cluster node $j cluster_state:[CI $j cluster_state]"
-        }
-    }
+    wait_for_cluster_state ok {0}
 }
 
 test "Cluster is writable" {
@@ -57,7 +49,7 @@ test "Instance #5 is now a master" {
 }
 
 test "Restarting the previously killed master node" {
-    resume_process $paused_pid
+    cluster_restart_node 0
 }
 
 test "Instance #0 gets converted into a slave" {

@@ -10,7 +10,7 @@ proc cluster_allocate_mixedSlots {masters replicas} {
     }
 }
 
-start_cluster 5 10 {tags {external:skip cluster}} {
+start_cluster 5 15 {tags {external:skip cluster}} {
 
 test "Cluster is up" {
     wait_for_cluster_state ok
@@ -46,6 +46,35 @@ test "slot migration is valid from primary to another primary" {
 
     assert_equal {OK} [$nodefrom(link) cluster setslot $slot node $nodeto(id)]
     assert_equal {OK} [$nodeto(link) cluster setslot $slot node $nodeto(id)]
+    $cluster close
+}
+
+test "Client unblocks after slot migration from one primary to another" {
+    set cluster [redis_cluster 127.0.0.1:[srv 0 port]]
+    set key mystream
+    set slot [$cluster cluster keyslot $key]
+    array set nodefrom [$cluster masternode_for_slot $slot]
+    array set nodeto [$cluster masternode_notfor_slot $slot]
+
+    # Create a stream group on the source node.
+    $nodefrom(link) XGROUP CREATE $key mygroup $ MKSTREAM
+
+    # Block another client on XREADGROUP.
+    set rd [redis_deferring_client_by_addr $nodefrom(host) $nodefrom(port)]
+    $rd XREADGROUP GROUP mygroup Alice BLOCK 0 STREAMS $key ">"
+    wait_for_condition 1000 50 {
+        [getInfoProperty [$nodefrom(link) info clients] blocked_clients] eq {1}
+    } else {
+        fail "client wasn't blocked"
+    }
+
+    # Migrating the stream deletes it from the source. XREADGROUP's
+    # unblock_on_nokey behavior must release the blocked client.
+    assert_equal {OK} [$nodefrom(link) CLUSTER SETSLOT $slot MIGRATING $nodeto(id)]
+    assert_equal {OK} [$nodeto(link) CLUSTER SETSLOT $slot IMPORTING $nodefrom(id)]
+    assert_equal {OK} [$nodefrom(link) MIGRATE $nodeto(host) $nodeto(port) $key 0 5000]
+    assert_error {*ASK*} {$rd read}
+    $rd close
     $cluster close
 }
 
