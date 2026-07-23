@@ -276,7 +276,6 @@ void dbgRunAssertions(redisDb *db) {
  * Even if the key expiry is master-driven, we can correctly report a key is
  * expired on replicas even if the master is lagging expiring our key via DELs
  * in the replication link. */
-// todo:vitah 脚本中执行TOUCH也更新LRU
 kvobj *lookupKey(redisDb *db, robj *key, int flags, dictEntryLink *link) {
 
     kvobj *val = dbFindByLink(db, key->ptr, link);
@@ -374,13 +373,10 @@ kvobj *lookupKeyWrite(redisDb *db, robj *key) {
 
 /* Like lookupKeyWrite(), but accepts ref to optional `link`
  *
- * link - If key found, updated to link the key.
- *        If key not found, updated to the bucket where the key should be added.
- *        If key not found and dict is empty, it is set to NULL
- * 类似于 lookupKeyWrite()，但接受一个可选的 `link` 引用参数
- * link - 如果找到了 key，会被更新为指向该 key 的链接；
- *        如果没有找到 key，会被更新为 key 应该被添加到的桶（bucket）的位置；
- *        如果没有找到 key 且字典为空，则会被设置为 NULL。
+ *   found & valid    -> returns the kvobj; link = the key's entry.
+ *   absent           -> returns NULL;      link = the bucket to add it to.
+ *   expired/trimmed  -> returns NULL;      link = NULL (key may still remain in the dict).
+ *   empty dict       -> returns NULL;      link = NULL.
  */
 kvobj *lookupKeyWriteWithLink(redisDb *db, robj *key, dictEntryLink *link) {
     return lookupKey(db, key, LOOKUP_NONE | LOOKUP_WRITE, link);
@@ -417,12 +413,6 @@ kvobj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply) {
  *          
  * keymeta - Defines metadata to be attached to the key. Including optional 
  *           expiration and modules metadata to be copied (REQUIRED).
- * expire - Set expiry of the key. -1 for no expiry.
- * 将一个键值对添加到 Redis 数据库中（用于底层 kvstore 结构），并使用事先计算好的 link 插入点来提高效率。
- *  redisDb *db：当前操作的 Redis 数据库。
- *  robj *key：Redis 对象格式的键。
- *  robj **valref：指向值对象的引用，插入后将更新为 kvobj。
- *  dictEntryLink *link：预先查找得到的插入位置信息，用于避免重复计算插入位置。
  */
 kvobj *dbAddInternal(redisDb *db, robj *key, robj **valref, dictEntryLink *link, 
                      const KeyMetaSpec *keymeta) 
@@ -791,6 +781,16 @@ void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, d
         notifyKeyspaceEvent(NOTIFY_OVERWRITTEN, "overwritten", key, db->id);
         if (oldtype != newtype)
             notifyKeyspaceEvent(NOTIFY_TYPE_CHANGED, "type_changed", key, db->id);
+
+        /* Overwriting a key with a list must wake blocked clients. Same
+         * type: only "grew" waiters (e.g. BLMOVEM EXACTLY). Type changed:
+         * treat as a fresh list (wakes BLPOP/BLMOVE/modules). */
+        if (newtype == OBJ_LIST) {
+            if (oldtype == OBJ_LIST)
+                signalKeyAsReadyNonEmptyList(db, key);
+            else
+                signalKeyAsReady(db, key, OBJ_LIST);
+        }
     } else {
         /* Add the new key to the database */
         dbAddByLink(db, key, valref, link);
@@ -1002,7 +1002,6 @@ long long emptyDbStructure(redisDb *dbarray, int dbnum, int async,
     }
 
     for (int j = startdb; j <= enddb; j++) {
-        // todo:vitah 没数据是不是可以忽略
         removed += kvstoreSize(dbarray[j].keys);
         if (async) {
             emptyDbAsync(&dbarray[j]);
@@ -1048,8 +1047,19 @@ long long emptyData(int dbnum, int flags, void(callback)(dict*)) {
         return -1;
     }
 
-    if (dbnum == -1 || dbnum == 0)
+    if (server.cluster_enabled && (dbnum == -1 || dbnum == 0)) {
+        /* Wiping the whole keyspace can't coexist with an active ASM task:
+         * On the migrating side, the flush would need to be propagated as a
+         * slot based command (FLUSHALL becomes SFLUSH <slots>) and forwarded
+         * to the ASM destination client even though it is a keyless command.
+         * On the importing side it would need to spare the slots still being
+         * imported. Rather than handle this complexity, we just cancel the ASM
+         * task. As this is not a common operation, the next ASM retry will
+         * succeed. Trim jobs are canceled too, since there is no data left to
+         * trim. */
+        clusterAsmCancel(NULL, "flush");
         asmCancelTrimJobs();
+    }
 
     /* Fire the flushdb modules event. */
     moduleFireServerEvent(REDISMODULE_EVENT_FLUSHDB,
@@ -1355,9 +1365,6 @@ int flushCommandCommon(client *c, int type, int flags, asmTrimCtx *trim_ctx) {
         blocking_async = 1;
     }
 
-    /* Cancel all ASM tasks that overlap with the given slot ranges. */
-    clusterAsmCancelBySlotRangeArray(trim_ctx ? trim_ctx->slots : NULL, c->argv[0]->ptr);
-
     if (type == FLUSH_TYPE_ALL)
         flushAllDataAndResetRDB(flags | EMPTYDB_NOFUNCTIONS);
     else
@@ -1592,7 +1599,6 @@ void randomkeyCommand(client *c) {
     decrRefCount(key);
 }
 
-// todo:vitah keys命令没有pattern会遍历全部数据库
 void keysCommand(client *c) {
     dictEntry *de;
     sds pattern = c->argv[1]->ptr;
@@ -1870,7 +1876,6 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             typename = c->argv[i+1]->ptr;
             type = getObjectTypeByName(typename);
             if (type == LLONG_MAX) {
-                // todo:vitah check
                 /* TODO: uncomment in redis 8.0
                 addReplyErrorFormat(c, "unknown type name '%s'", typename);
                 return; */
@@ -2101,6 +2106,48 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             p = lpNext(lp, p);
         }
         setDeferredArrayLen(c,replylen,cur_length);
+        return;
+    } else if (o->type == OBJ_HASH &&
+               (o->encoding == OBJ_ENCODING_TMPL_LP ||
+                o->encoding == OBJ_ENCODING_TMPL_ARRAY))
+    {
+        unsigned long n = hashTypeLength(o, 0);
+        vecRelease(&keys);
+        addReplyArrayLen(c, 2);
+        /* Cursor is always 0 given we iterate over all hash fields. */
+        addReplyBulkLongLong(c, 0);
+
+        void *replylen = NULL;
+        unsigned long cur_length = 0;
+        if (use_pattern)
+            replylen = addReplyDeferredLen(c);
+        else
+            addReplyArrayLen(c, no_values ? n : n * 2);
+
+        hashTypeIterator hi;
+        hashTypeInitIterator(&hi, o);
+        while (hashTypeNext(&hi, 0) != C_ERR) {
+            unsigned char *vstr;
+            size_t vlen;
+            long long vll;
+            hashTypeCurrentObject(&hi, OBJ_HASH_KEY, &vstr, &vlen, &vll, NULL);
+            if (use_pattern && !stringmatchlen(pat, patlen, (char*)vstr, vlen, 0))
+                continue;
+            addReplyBulkCBuffer(c, vstr, vlen);
+            cur_length++;
+            if (!no_values) {
+                hashTypeCurrentObject(&hi, OBJ_HASH_VALUE, &vstr, &vlen, &vll, NULL);
+                if (vstr)
+                    addReplyBulkCBuffer(c, vstr, vlen);
+                else
+                    addReplyBulkLongLong(c, vll);
+                cur_length++;
+            }
+        }
+        hashTypeResetIterator(&hi);
+
+        if (use_pattern)
+            setDeferredArrayLen(c, replylen, cur_length);
         return;
     } else {
         serverPanic("Not handled encoding in SCAN.");
@@ -2870,7 +2917,6 @@ void propagateDeletion(redisDb *db, robj *key, int lazy) {
 
     argv[0] = lazy ? shared.unlink : shared.del;
     argv[1] = key;
-    // todo:vitah incr后又decr
     incrRefCount(argv[0]);
     incrRefCount(argv[1]);
 
@@ -3575,6 +3621,16 @@ int sintercardGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysRe
     return genericGetKeys(0, 1, 2, 1, argv, argc, result);
 }
 
+int sunioncardGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result) {
+    UNUSED(cmd);
+    return genericGetKeys(0, 1, 2, 1, argv, argc, result);
+}
+
+int sdiffcardGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result) {
+    UNUSED(cmd);
+    return genericGetKeys(0, 1, 2, 1, argv, argc, result);
+}
+
 int zunionInterDiffStoreGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result) {
     UNUSED(cmd);
     return genericGetKeys(1, 2, 3, 1, argv, argc, result);
@@ -3677,12 +3733,12 @@ int sortGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *
                 i += skiplist[j].skip;
                 break;
             } else if (!strcasecmp(argv[i]->ptr,"store") && i+1 < argc) {
-                /* Note: we don't increment "num" here and continue the loop
-                 * to be sure to process the *last* "STORE" option if multiple
-                 * ones are provided. This is same behavior as SORT. */
+                /* Don't increment "num" so the *last* STORE option wins if
+                 * several are given (same behavior as SORT). */
                 found_store = 1;
                 keys[num].pos = i+1; /* <store-key> */
                 keys[num].flags = CMD_KEY_OW | CMD_KEY_UPDATE;
+                i++; /* Skip the store argument so it isn't re-parsed as an option keyword. */
                 break;
             }
         }
@@ -3770,8 +3826,10 @@ int migrateGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResul
  * GEORADIUS key x y radius unit [WITHDIST] [WITHHASH] [WITHCOORD] [ASC|DESC]
  *                             [COUNT count] [STORE key|STOREDIST key]
  * GEORADIUSBYMEMBER key member radius unit ... options ...
- * 
- * This command has a fully defined keyspec, so returning flags isn't needed. */
+ *
+ * STORE/STOREDIST keyspecs are marked incomplete because duplicate options
+ * use last-wins semantics (same as georadiusGeneric). ACL and other callers
+ * of getKeysFromCommandWithSpecs fall back here. */
 int georadiusGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result) {
     int i, num;
     keyReference *keys;
@@ -3800,10 +3858,10 @@ int georadiusGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysRes
 
     /* Add all key positions to keys[] */
     keys[0].pos = 1;
-    keys[0].flags = 0;
-    if(num > 1) {
+    keys[0].flags = CMD_KEY_RO | CMD_KEY_ACCESS;
+    if (num > 1) {
          keys[1].pos = stored_key;
-         keys[1].flags = 0;
+         keys[1].flags = CMD_KEY_OW | CMD_KEY_UPDATE;
     }
     result->numkeys = num;
     return num;
@@ -3812,7 +3870,8 @@ int georadiusGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysRes
 /* XREAD [BLOCK <milliseconds>] [COUNT <count>] [GROUP <groupname> <ttl>]
  *       STREAMS key_1 key_2 ... key_N ID_1 ID_2 ... ID_N
  *
- * This command has a fully defined keyspec, so returning flags isn't needed. */
+ * The keyspec is incomplete, so callers fall back to this function to parse
+ * the options and locate the real STREAMS token. */
 int xreadGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result) {
     int i, num = 0;
     keyReference *keys;
@@ -3829,6 +3888,12 @@ int xreadGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult 
             i++; /* Skip option argument. */
         } else if (!strcasecmp(arg, "count")) {
             i++; /* Skip option argument. */
+        } else if (!strcasecmp(arg, "maxcount")) {
+            i++; /* Skip option argument. */
+        } else if (!strcasecmp(arg, "maxsize")) {
+            i++; /* Skip option argument. */
+        } else if (!strcasecmp(arg, "claim")) {
+            i++; /* Skip option argument (min-idle-time). */
         } else if (!strcasecmp(arg, "group")) {
             i += 2; /* Skip option argument. */
         } else if (!strcasecmp(arg, "noack")) {
@@ -3853,7 +3918,7 @@ int xreadGetKeys(struct redisCommand *cmd, robj **argv, int argc, getKeysResult 
     keys = getKeysPrepareResult(result, num);
     for (i = streams_pos+1; i < argc-num; i++) {
         keys[i-streams_pos-1].pos = i;
-        keys[i-streams_pos-1].flags = 0; 
+        keys[i-streams_pos-1].flags = CMD_KEY_RO | CMD_KEY_ACCESS;
     } 
     result->numkeys = num;
     return num;

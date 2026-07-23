@@ -112,6 +112,7 @@
 #include <string.h>
 #include <strings.h>
 #include <stdint.h>
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -564,6 +565,7 @@ int VADD_CASReply(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
             newnode = hnsw_insert(vset->hnsw, vec, NULL, 0, 0, nv, ef);
             RedisModule_Assert(newnode != NULL);
         }
+        if (attrib != NULL) vset->numattribs++;
         RedisModule_DictSet(vset->dict,val,newnode);
         val = NULL; // Don't free it later.
         attrib = NULL; // Don't free it later.
@@ -1593,6 +1595,11 @@ int VRANDMEMBER_RedisCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int 
         /* Count = 0 is a special case, return empty array */
         if (count == 0) {
             return RedisModule_ReplyWithEmptyArray(ctx);
+        }
+        /* Negating LLONG_MIN to get abs(count) is UB and overflows the reply length. */
+        if (count == LLONG_MIN) {
+            return RedisModule_ReplyWithError(ctx,
+                "ERR COUNT value is out of range");
         }
     }
 
