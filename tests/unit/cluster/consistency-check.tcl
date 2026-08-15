@@ -46,72 +46,86 @@ proc cluster_write_keys_with_expire {id ttl} {
 # that arrive from the master
 proc test_slave_load_expired_keys {aof} {
     test "Slave expired keys is loaded when restarted: appendonly=$aof" {
-        set master_id [find_non_empty_master]
-        set replica_id [get_one_of_my_replica $master_id]
+        set expire_disabled 0
+        set replica_expire_disabled 0
+        set status [catch {
+            set master_id [find_non_empty_master]
+            set replica_id [get_one_of_my_replica $master_id]
 
-        set master_dbsize_0 [R $master_id dbsize]
-        set replica_dbsize_0 [R $replica_id dbsize]
-        assert_equal $master_dbsize_0 $replica_dbsize_0
+            set master_dbsize_0 [R $master_id dbsize]
+            set replica_dbsize_0 [R $replica_id dbsize]
+            assert_equal $master_dbsize_0 $replica_dbsize_0
 
-        # config the replica persistency and rewrite the config file to survive restart
-        # note that this needs to be done before populating the volatile keys since
-        # that triggers and AOFRW, and we rather the AOF file to have 'SET PXAT' commands
-        # rather than an RDB with volatile keys
-        R $replica_id config set appendonly $aof
-        R $replica_id config rewrite
+            # Configure persistence before populating volatile keys so the
+            # replica reloads the intended RDB/AOF representation.
+            R $replica_id config set appendonly $aof
+            R $replica_id config rewrite
 
-        # fill with 100 keys with 3 second TTL
-        set data_ttl 3
-        cluster_write_keys_with_expire $master_id $data_ttl
+            set data_ttl 3
+            cluster_write_keys_with_expire $master_id $data_ttl
 
-        # wait for replica to be in sync with master
-        wait_for_condition 500 10 {
-            [R $replica_id dbsize] eq [R $master_id dbsize]
-        } else {
-            fail "replica didn't sync"
-        }
-        
-        set replica_dbsize_1 [R $replica_id dbsize]
-        assert {$replica_dbsize_1 > $replica_dbsize_0}
-
-        # make replica create persistence file
-        if {$aof == "yes"} {
-            # we need to wait for the initial AOFRW to be done
-            wait_for_condition 100 10 {
-                [s -$replica_id aof_rewrite_scheduled] eq 0 &&
-                [s -$replica_id aof_rewrite_in_progress] eq 0
+            wait_for_condition 500 10 {
+                [R $replica_id dbsize] eq [R $master_id dbsize]
             } else {
-                fail "AOFRW didn't finish"
+                fail "replica didn't sync"
             }
-        } else {
-            R $replica_id save
+
+            set replica_dbsize_1 [R $replica_id dbsize]
+            assert {$replica_dbsize_1 > $replica_dbsize_0}
+
+            if {$aof == "yes"} {
+                wait_for_condition 100 10 {
+                    [s -$replica_id aof_rewrite_scheduled] eq 0 &&
+                    [s -$replica_id aof_rewrite_in_progress] eq 0
+                } else {
+                    fail "AOFRW didn't finish"
+                }
+            } else {
+                R $replica_id save
+            }
+
+            # Prevent the master from propagating expiry DELs while the
+            # replica is offline. The replica must reload the expired keys
+            # from persistence before receiving those DELs.
+            R $master_id DEBUG SET-ACTIVE-EXPIRE 0
+            set expire_disabled 1
+            set old_pid [srv -$replica_id pid]
+            cluster_kill_node $replica_id
+            after [expr {$data_ttl * 1000}]
+            cluster_restart_node $replica_id
+            assert {[srv -$replica_id pid] ne $old_pid}
+
+            set replica_dbsize_3 [R $replica_id dbsize]
+            assert {$replica_dbsize_3 > $replica_dbsize_0}
+
+            R $replica_id DEBUG SET-ACTIVE-EXPIRE 0
+            set replica_expire_disabled 1
+            wait_for_condition 500 10 {
+                [s -$replica_id master_link_status] eq {up}
+            } else {
+                fail "replica didn't reconnect after restart"
+            }
+
+            R $master_id DEBUG SET-ACTIVE-EXPIRE 1
+            set expire_disabled 0
+            R $replica_id DEBUG SET-ACTIVE-EXPIRE 1
+            set replica_expire_disabled 0
+
+            wait_for_condition 500 10 {
+                [R $replica_id dbsize] eq $master_dbsize_0
+            } else {
+                fail "keys didn't expire"
+            }
+        } result code_options]
+
+        if {$expire_disabled} {
+            catch {R $master_id DEBUG SET-ACTIVE-EXPIRE 1}
         }
-
-        # kill the replica (would stay down until re-started)
-        set paused_pid [srv -$replica_id pid]
-        pause_process $paused_pid
-
-        # Make sure the master doesn't do active expire (sending DELs to the replica)
-        R $master_id DEBUG SET-ACTIVE-EXPIRE 0
-
-        # wait for all the keys to get logically expired
-        after [expr $data_ttl*1000]
-
-        # start the replica again (loading an RDB or AOF file)
-        resume_process $paused_pid
-
-        # make sure the keys are still there
-        set replica_dbsize_3 [R $replica_id dbsize]
-        assert {$replica_dbsize_3 > $replica_dbsize_0}
-        
-        # restore settings
-        R $master_id DEBUG SET-ACTIVE-EXPIRE 1
-
-        # wait for the master to expire all keys and replica to get the DELs
-        wait_for_condition 500 10 {
-            [R $replica_id dbsize] eq $master_dbsize_0
-        } else {
-            fail "keys didn't expire"
+        if {$replica_expire_disabled} {
+            catch {R $replica_id DEBUG SET-ACTIVE-EXPIRE 1}
+        }
+        if {$status} {
+            return -options $code_options $result
         }
     }
 }

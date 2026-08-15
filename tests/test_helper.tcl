@@ -26,6 +26,7 @@ source tests/support/util.tcl
 
 set dir [pwd]
 set ::all_tests []
+set ::cluster_all_tests []
 
 set test_dirs {
     unit
@@ -39,7 +40,11 @@ foreach test_dir $test_dirs {
     set files [glob -nocomplain $dir/tests/$test_dir/*.tcl]
 
     foreach file [lsort $files] {
-        lappend ::all_tests $test_dir/[file root [file tail $file]]
+        set test_name $test_dir/[file root [file tail $file]]
+        lappend ::all_tests $test_name
+        if {$test_dir eq {unit/cluster}} {
+            lappend ::cluster_all_tests $test_name
+        }
     }
 }
 # Index to the next test to run in the ::all_tests list.
@@ -91,6 +96,9 @@ set ::log_req_res 0
 set ::force_resp3 0
 set ::debug_defrag 0
 set ::compression 0
+set ::cluster_only 0
+set ::skip_cluster 0
+set ::list_tests 0
 
 # Set to 1 when we are running in client mode. The Redis test uses a
 # server-client model to run tests simultaneously. The server instance
@@ -574,6 +582,8 @@ proc print_help_screen {} {
         "--accurate         Run slow randomized tests for more iterations."
         "--quiet            Don't show individual tests."
         "--single <unit>    Just execute the specified unit (see next option). This option can be repeated."
+        "--cluster          Run only the unit/cluster test units."
+        "--skip-cluster     Exclude all unit/cluster test units."
         "--verbose          Increases verbosity."
         "--list-tests       List all the available test units."
         "--only <test>      Just execute the specified test by test name or tests that match <test> regexp (if <test> starts with '/'). This option can be repeated."
@@ -681,6 +691,10 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
     } elseif {$opt eq {--single}} {
         lappend ::single_tests $arg
         incr j
+    } elseif {$opt eq {--cluster}} {
+        set ::cluster_only 1
+    } elseif {$opt eq {--skip-cluster}} {
+        set ::skip_cluster 1
     } elseif {$opt eq {--only}} {
         lappend ::only_tests $arg
         incr j
@@ -691,10 +705,7 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
         set ::skip_till $arg
         incr j
     } elseif {$opt eq {--list-tests}} {
-        foreach t $::all_tests {
-            puts $t
-        }
-        exit 0
+        set ::list_tests 1
     } elseif {$opt eq {--verbose}} {
         incr ::verbose
     } elseif {$opt eq {--client}} {
@@ -750,22 +761,48 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
     }
 }
 
-set filtered_tests {}
-
-# Set the filtered tests to be the short list (single_tests) if exists.
-# Otherwise, we start filtering all_tests
-if {[llength $::single_tests] > 0} {
-    set filtered_tests $::single_tests
-} else {
-    set filtered_tests $::all_tests
+if {$::cluster_only && $::skip_cluster} {
+    puts "--cluster and --skip-cluster cannot be used together"
+    exit 1
 }
 
-# If --skip-till option was given, we populate the list of single tests
-# to run with everything *after* the specified unit.
+if {$::cluster_only} {
+    set selected_tests $::cluster_all_tests
+} else {
+    set selected_tests $::all_tests
+}
+
+if {$::skip_cluster} {
+    set non_cluster_tests {}
+    foreach t $selected_tests {
+        if {![string match {unit/cluster/*} $t]} {
+            lappend non_cluster_tests $t
+        }
+    }
+    set selected_tests $non_cluster_tests
+}
+
+# Set the filtered tests to the short list (single_tests) if it exists.
+# Validate it against the selected collection so --skip-cluster cannot be
+# bypassed with --single unit/cluster/....
+if {[llength $::single_tests] > 0} {
+    set filtered_tests {}
+    foreach t $::single_tests {
+        if {[lsearch -exact $selected_tests $t] == -1} {
+            puts "test $t is not available in the selected test collection"
+            exit 1
+        }
+        lappend filtered_tests $t
+    }
+} else {
+    set filtered_tests $selected_tests
+}
+
+# If --skip-till was given, remove units through and including the target.
 if {$::skip_till != ""} {
     set skipping 1
-    foreach t $::all_tests {
-        if {$skipping == 1} {
+    foreach t $selected_tests {
+        if {$skipping && [lsearch -exact $filtered_tests $t] >= 0} {
             lremove filtered_tests $t
         }
         if {$t == $::skip_till} {
@@ -773,25 +810,39 @@ if {$::skip_till != ""} {
         }
     }
     if {$skipping} {
-        puts "test $::skip_till not found"
-        exit 0
+        puts "test $::skip_till not found in the selected test collection"
+        exit 1
     }
 }
 
-# If --skipunits option was given, we populate the list of single tests
-# to run with everything *not* in the skipunits list.
-if {[llength $::skipunits] > 0} {
+# Remove explicitly skipped units from the selected collection.
+foreach t $::skipunits {
+    if {[lsearch -exact $filtered_tests $t] >= 0} {
+        lremove filtered_tests $t
+    }
+}
+
+set ::all_tests $filtered_tests
+
+if {$::list_tests} {
+    if {[llength $::all_tests] == 0} {
+        puts "test selection is empty"
+        exit 1
+    }
     foreach t $::all_tests {
-        if {[lsearch $::skipunits $t] != -1} {
-            lremove filtered_tests $t
-        }
+        puts $t
     }
+    exit 0
 }
 
-# Override the list of tests with the specific tests we want to run
-# in case there was some filter, that is --single, -skipunit or --skip-till options.
-if {[llength $filtered_tests] < [llength $::all_tests]} {
-    set ::all_tests $filtered_tests
+if {[llength $::all_tests] == 0} {
+    puts "test selection is empty"
+    exit 1
+}
+
+# Avoid starting idle test clients when a filtered run contains fewer units.
+if {!$::client && $::numclients > [llength $::all_tests]} {
+    set ::numclients [llength $::all_tests]
 }
 
 proc attach_to_replication_stream_on_connection {conn} {

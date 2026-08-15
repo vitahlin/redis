@@ -29,7 +29,9 @@ proc cluster_shards_get_node_info {node_id reference {type node}} {
 
 # The legacy runner provided a pool of 20 servers. Only nodes 0-7 initially
 # belong to the four shards; nodes 8-19 remain unassigned for later tests.
-start_cluster 4 4 {tags {external:skip cluster}} {
+tags {slow} {
+run_solo {cluster-shards} {
+start_cluster 4 4 {tags {external:skip cluster slow}} {
 
 test "Cluster should start ok" {
     wait_for_cluster_state ok
@@ -241,3 +243,5 @@ test "CLUSTER MYSHARDID reports same shard id after cluster restart" {
 }
 
 } cluster_shards_split_slot_allocation default_replica_allocation 20 ;# start_cluster
+} ;# run_solo
+} ;# tags

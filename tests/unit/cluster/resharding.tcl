@@ -1,6 +1,8 @@
 # Stress writes while redis-cli performs a live reshard, then verify AOF
 # persistence and replica consistency across process restarts.
 
+tags {slow} {
+run_solo {cluster-resharding} {
 start_cluster 5 5 {tags {external:skip cluster slow} overrides {appendonly yes appendfsync no}} {
 
 test "Cluster is up" {
@@ -45,7 +47,36 @@ array set content {}
 set reshard_pid {}
 set reshard_output [tmpfile redis-cli-reshard.log]
 
+proc cleanup_resharding_process {} {
+    global reshard_pid cluster cluster_plaintext
+
+    if {$reshard_pid ne {} && ![catch {is_alive $reshard_pid} alive] && $alive} {
+        catch {exec kill -TERM $reshard_pid}
+        for {set i 0} {$i < 100} {incr i} {
+            if {[catch {is_alive $reshard_pid} alive] || !$alive} break
+            after 10
+        }
+        if {![catch {is_alive $reshard_pid} alive] && $alive} {
+            catch {exec kill -KILL $reshard_pid}
+        }
+    }
+    catch {$cluster_plaintext close}
+    if {$cluster_plaintext ne $cluster} {
+        catch {$cluster close}
+    }
+}
+
+proc with_resharding_cleanup {code} {
+    set status [catch {uplevel 1 $code} result code_options]
+    if {$status} {
+        cleanup_resharding_process
+        return -options $code_options $result
+    }
+    return $result
+}
+
 test "Cluster consistency during live resharding" {
+    with_resharding_cleanup {
     set ele 0
     for {set j 0} {$j < $numops} {incr j} {
         if {$reshard_pid ne {} &&
@@ -89,12 +120,13 @@ test "Cluster consistency during live resharding" {
     }
 
     wait_for_condition 1000 500 {
-        ![is_alive $reshard_pid]
+        $reshard_pid eq {} || ![is_alive $reshard_pid]
     } else {
         set fd [open $reshard_output r]
         set output [read $fd]
         close $fd
         fail "Resharding did not terminate. redis-cli output:\n$output"
+    }
     }
 }
 
@@ -169,3 +201,5 @@ if {$cluster_plaintext ne $cluster} {
 $cluster close
 
 } ;# start_cluster
+} ;# run_solo
+} ;# tags

@@ -196,34 +196,79 @@ proc wait_for_cluster_size {cluster_size} {
     }
 }
 
-proc cluster_secrets_consistent {{excluded_ids {}}} {
-    set secrets {}
-    for {set j 0} {$j < [llength $::servers]} {incr j} {
-        if {[lsearch -exact $excluded_ids $j] >= 0} continue
-        lappend secrets [R $j debug internal_secret]
+# Validate a normal-framework cluster node ID. Cluster IDs are non-negative
+# indices, while server levels are their negative counterparts.
+proc cluster_validate_node_id {id} {
+    if {![string is integer -strict $id] || $id < 0 || $id >= [llength $::servers]} {
+        error "invalid cluster node id '$id' (expected 0..[expr {[llength $::servers] - 1}])"
     }
-    expr {[llength [lsort -unique $secrets]] <= 1}
+    return $id
+}
+
+# Return the nodes that are actually checked by a cluster-state assertion.
+proc cluster_checked_node_ids {{excluded_ids {}}} {
+    set excluded {}
+    foreach id $excluded_ids {
+        cluster_validate_node_id $id
+        if {[lsearch -exact $excluded $id] >= 0} {
+            error "duplicate excluded cluster node id '$id'"
+        }
+        lappend excluded $id
+    }
+
+    set checked {}
+    for {set j 0} {$j < [llength $::servers]} {incr j} {
+        if {[lsearch -exact $excluded $j] < 0} {
+            lappend checked $j
+        }
+    }
+    if {[llength $checked] == 0} {
+        error "wait_for_cluster_state cannot exclude every cluster node"
+    }
+    return $checked
+}
+
+proc cluster_secrets_consistent {checked_ids} {
+    if {[llength $checked_ids] == 0} {
+        return 0
+    }
+    set secrets {}
+    foreach id $checked_ids {
+        lappend secrets [R $id debug internal_secret]
+    }
+    expr {[llength [lsort -unique $secrets]] == 1}
+}
+
+proc cluster_state_snapshot {checked_ids} {
+    set states {}
+    foreach id $checked_ids {
+        if {[catch {CI $id cluster_state} actual_state]} {
+            set actual_state unavailable
+        }
+        lappend states "$id=$actual_state"
+    }
+    return [join $states {, }]
 }
 
 # Check that the available cluster nodes agree about "state", or raise an
 # error. Tests that intentionally stop nodes can pass their instance IDs in
 # excluded_ids.
 proc wait_for_cluster_state {state {excluded_ids {}}} {
-    for {set j 0} {$j < [llength $::servers]} {incr j} {
-        if {[lsearch -exact $excluded_ids $j] >= 0} continue
+    set checked_ids [cluster_checked_node_ids $excluded_ids]
+    foreach j $checked_ids {
         wait_for_condition 1000 50 {
             [CI $j cluster_state] eq $state
         } else {
-            fail "Cluster node $j cluster_state:[CI $j cluster_state]"
+            fail "Failed waiting for cluster state '$state'; excluded nodes: $excluded_ids; checked nodes: $checked_ids; actual states: [cluster_state_snapshot $checked_ids]"
         }
     }
 
     # The legacy cluster runner treated secret convergence as part of reaching
     # a cluster state. Preserve that guarantee for the available nodes.
     wait_for_condition 50 100 {
-        [cluster_secrets_consistent $excluded_ids]
+        [cluster_secrets_consistent $checked_ids]
     } else {
-        fail "Failed waiting for cluster secrets to sync"
+        fail "Failed waiting for cluster secrets to sync on nodes $checked_ids"
     }
 }
 
@@ -231,6 +276,7 @@ proc wait_for_cluster_state {state {excluded_ids {}}} {
 # definitions in place. Instance ID 0 is the innermost server, ID 1 is the
 # next outer server, and so on.
 proc cluster_kill_node {id} {
+    cluster_validate_node_id $id
     set level [expr {-$id}]
     set server [get_srv $level]
     set pid [dict get $server pid]
@@ -246,6 +292,7 @@ proc cluster_kill_node {id} {
 }
 
 proc cluster_restart_node {id} {
+    cluster_validate_node_id $id
     set level [expr {-$id}]
     set pid [srv $level pid]
     if {[is_alive $pid]} {
@@ -326,6 +373,13 @@ proc cluster_call_slot_allocator {slot_allocator masters replicas} {
 # Setup method to be executed to configure the cluster before the
 # tests run.
 proc cluster_setup {masters replicas node_count slot_allocator replica_allocator code} {
+    # Assign deterministic, unique epochs before nodes meet. This preserves
+    # the legacy runner's setup semantics and avoids relying on convergence
+    # to resolve duplicate epochs.
+    for {set i 0} {$i < $node_count} {incr i} {
+        R $i CLUSTER SET-CONFIG-EPOCH [expr {$i + 1}]
+    }
+
     # Have all nodes meet
     if {$::tls} {
         set tls_cluster [lindex [R 0 CONFIG GET tls-cluster] 1]
@@ -357,8 +411,6 @@ proc cluster_setup {masters replicas node_count slot_allocator replica_allocator
 # will be allocated to masters by round robin. node_count is optional and may
 # be larger than masters + replicas when a test needs unassigned/spare nodes.
 proc start_cluster {masters replicas options code {slot_allocator continuous_slot_allocation} {replica_allocator default_replica_allocation} {node_count {}}} {
-    set ::cluster_master_nodes $masters
-    set ::cluster_replica_nodes $replicas
     set configured_node_count [expr {$masters + $replicas}]
     if {$node_count eq {}} {
         set node_count $configured_node_count
@@ -366,20 +418,42 @@ proc start_cluster {masters replicas options code {slot_allocator continuous_slo
         error "node_count ($node_count) must be at least masters + replicas ($configured_node_count)"
     }
 
+    set had_master_nodes [info exists ::cluster_master_nodes]
+    set had_replica_nodes [info exists ::cluster_replica_nodes]
+    if {$had_master_nodes} {set old_master_nodes $::cluster_master_nodes}
+    if {$had_replica_nodes} {set old_replica_nodes $::cluster_replica_nodes}
+    set ::cluster_master_nodes $masters
+    set ::cluster_replica_nodes $replicas
+
     # Set the final code to be the tests + cluster setup
     set code [list cluster_setup $masters $replicas $node_count $slot_allocator $replica_allocator $code]
 
     # Configure the starting of multiple servers. Set cluster node timeout
     # aggressively since many tests depend on ping/pong messages. 
-    set cluster_options [list overrides [list cluster-enabled yes cluster-ping-interval 100 cluster-node-timeout 3000 cluster-slot-stats-enabled yes]]
+    set node_timeout [expr {$::valgrind ? 10000 : 3000}]
+    set cluster_options [list overrides [list cluster-enabled yes cluster-ping-interval 100 cluster-node-timeout $node_timeout cluster-slot-stats-enabled yes]]
     set options [concat $cluster_options $options]
 
     # Cluster mode only supports a single database, so before executing the tests
     # it needs to be configured correctly and needs to be reset after the tests. 
     set old_singledb $::singledb
     set ::singledb 1
-    start_multiple_servers $node_count $options $code
+    set status [catch {start_multiple_servers $node_count $options $code} result code_options]
     set ::singledb $old_singledb
+    if {$had_master_nodes} {
+        set ::cluster_master_nodes $old_master_nodes
+    } else {
+        unset -nocomplain ::cluster_master_nodes
+    }
+    if {$had_replica_nodes} {
+        set ::cluster_replica_nodes $old_replica_nodes
+    } else {
+        unset -nocomplain ::cluster_replica_nodes
+    }
+    if {$status} {
+        return -options $code_options $result
+    }
+    return $result
 }
 
 # Test node for flag.

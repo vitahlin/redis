@@ -5,7 +5,9 @@
 
 # Use three replicas per master so that no master is empty and rebalancing is
 # easier to reason about during the test.
-start_cluster 5 15 {tags {external:skip cluster}} {
+tags {slow} {
+run_solo {cluster-replica-migration-3} {
+start_cluster 5 15 {tags {external:skip cluster slow}} {
 
 test "Cluster is up" {
     wait_for_cluster_state ok
@@ -54,3 +56,5 @@ test "Each master should have at least two replicas attached" {
 }
 
 } ;# start_cluster
+} ;# run_solo
+} ;# tags

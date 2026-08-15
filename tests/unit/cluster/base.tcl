@@ -3,10 +3,14 @@
 # make sure the test infra won't use SELECT
 set old_singledb $::singledb
 set ::singledb 1
+set base_status 0
+set base_result {}
+set base_options {}
 
 tags {external:skip cluster} {
 
 set base_conf [list cluster-enabled yes]
+set base_status [catch {
 start_multiple_servers 5 [list overrides $base_conf] {
 
 test "Cluster nodes are reachable" {
@@ -20,6 +24,28 @@ test "Cluster nodes are reachable" {
             fail "Node #$id keeps replying '$err' to PING."
         }
     }
+}
+
+test "Cluster state helpers reject invalid node selections" {
+    assert_error {*invalid cluster node id*} {
+        wait_for_cluster_state ok {-1}
+    }
+    assert_error {*invalid cluster node id*} {
+        wait_for_cluster_state ok {5}
+    }
+    assert_error {*duplicate excluded cluster node id*} {
+        wait_for_cluster_state ok {0 0}
+    }
+    assert_error {*cannot exclude every cluster node*} {
+        wait_for_cluster_state ok {0 1 2 3 4}
+    }
+    assert_error {*invalid cluster node id*} {
+        cluster_kill_node -1
+    }
+    assert_error {*invalid cluster node id*} {
+        cluster_restart_node 5
+    }
+    assert_equal 0 [cluster_secrets_consistent {}]
 }
 
 test "Cluster nodes hard reset" {
@@ -147,7 +173,11 @@ test "CLUSTER FORGET with invalid node ID" {
 }
 
 } ;# stop servers
+} base_result base_options]
 
 } ;# tags
 
 set ::singledb $old_singledb
+if {$base_status} {
+    return -options $base_options $base_result
+}

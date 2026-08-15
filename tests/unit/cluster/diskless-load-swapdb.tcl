@@ -58,12 +58,20 @@ test "Main db not affected when fail to diskless load" {
     # backlog size is very small, and dumping rdb will cost several seconds.
     set num 10000
     set value [string repeat A 1024]
-    set rd [redis_deferring_client redis $master_id]
-    for {set j 0} {$j < $num} {incr j} {
-        $rd set $j $value
-    }
-    for {set j 0} {$j < $num} {incr j} {
-        $rd read
+    set rd [redis_deferring_client $master_id]
+    set pipeline_status [catch {
+        $rd role
+        assert_equal master [lindex [$rd read] 0]
+        for {set j 0} {$j < $num} {incr j} {
+            $rd set $j $value
+        }
+        for {set j 0} {$j < $num} {incr j} {
+            $rd read
+        }
+    } pipeline_result pipeline_options]
+    catch {$rd close}
+    if {$pipeline_status} {
+        return -options $pipeline_options $pipeline_result
     }
 
     # Start the replica again

@@ -22,7 +22,7 @@ wget $DOWNLOADURL
 tar xvzf $TARNAME
 cd redis-${TAG}
 make
-./runtest
+./runtest --skip-cluster
 ./runtest-sentinel
 ./runtest-cluster
 ./runtest-moduleapi
