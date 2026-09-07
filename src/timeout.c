@@ -16,7 +16,8 @@
 
 /* Check if this blocked client timedout (does nothing if the client is
  * not blocked right now). If so send a reply, unblock it, and return 1.
- * Otherwise 0 is returned and no operation is performed. */
+ * Otherwise 0 is returned and no operation is performed.
+ * 'now' is monotonic time in milliseconds. */
 int checkBlockedClientTimeout(client *c, mstime_t now) {
     if (c->flags & CLIENT_BLOCKED &&
         c->bstate.timeout != 0
@@ -62,7 +63,7 @@ int clientsCronHandleTimeout(client *c, mstime_t now_ms) {
 /* For blocked clients timeouts we populate a radix tree of 128 bit keys
  * composed as such:
  *
- *  [8 byte big endian expire time]+[8 byte client ID]
+ *  [8 byte big endian monotonic expire time in ms]+[8 byte client ID]
  *
  * We don't do any cleanup in the Radix tree: when we run the clients that
  * reached the timeout already, if they are no longer existing or no longer
@@ -72,7 +73,7 @@ int clientsCronHandleTimeout(client *c, mstime_t now_ms) {
  * the tree. In beforeSleep() we call handleBlockedClientsTimeout() to run
  * the tree and unblock the clients. */
 
-#define CLIENT_ST_KEYLEN 16    /* 8 bytes mstime + 8 bytes client ID. */
+#define CLIENT_ST_KEYLEN 16    /* 8 bytes monotonic ms + 8 bytes client ID. */
 
 /* Given client ID and timeout, write the resulting radix tree key in buf. */
 void encodeTimeoutKey(unsigned char *buf, uint64_t timeout, client *c) {
@@ -117,7 +118,7 @@ void removeClientFromTimeoutTable(client *c) {
  * that are waiting in blocking operations with a timeout set. */
 void handleBlockedClientsTimeout(void) {
     if (raxSize(server.clients_timeout_table) == 0) return;
-    uint64_t now = mstime();
+    uint64_t now = getMonotonicUs() / 1000;
     raxIterator ri;
     raxStart(&ri,server.clients_timeout_table);
     raxSeek(&ri,"^",NULL,0);
@@ -138,15 +139,16 @@ void handleBlockedClientsTimeout(void) {
 /* Get a timeout value from an object and store it into 'timeout'.
  * The final timeout is always stored as milliseconds as a time where the
  * timeout will expire, however the parsing is performed according to
- * the 'unit' that can be seconds or milliseconds.
+ * the 'unit' that can be seconds or milliseconds. The caller supplies 'now'
+ * in milliseconds, selecting the clock used for the deadline: monotonic time
+ * for blocking operations, or wall-clock time for CLIENT PAUSE.
  *
  * Note that if the timeout is zero (usually from the point of view of
  * commands API this means no timeout) the value stored into 'timeout'
  * is zero. */
-int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int unit) {
+int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int unit, mstime_t now) {
     long long tval;
     long double ftval;
-    mstime_t now = commandTimeSnapshot();
 
     if (unit == UNIT_SECONDS) {
         if (getLongDoubleFromObjectOrReply(c,object,&ftval,

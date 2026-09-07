@@ -4786,7 +4786,7 @@ NULL
         }
 
         if (getTimeoutFromObjectOrReply(c,c->argv[2],&end,
-            UNIT_MILLISECONDS) != C_OK) return;
+            UNIT_MILLISECONDS,commandTimeSnapshot()) != C_OK) return;
         pauseClientsByClient(end, isPauseClientAll);
         addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"tracking") && c->argc >= 3) {
