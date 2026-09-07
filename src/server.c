@@ -3055,7 +3055,7 @@ void initServer(void) {
     server.clients_pending_write = listCreate();
     server.clients_pending_read = listCreate();
     server.clients_with_pending_ref_reply = listCreate();
-    /* clients_timeout_table key = 8 bytes BE monotonic ms + 8 bytes client ID
+    /* clients_timeout_table key = 8 bytes BE mstime + 8 bytes client ID
      * (see CLIENT_ST_KEYLEN / encodeTimeoutKey in timeout.c). */
     server.clients_timeout_table = raxNewEx(0, NULL, sizeof(uint64_t) * 2);
     server.replication_allowed = 1;

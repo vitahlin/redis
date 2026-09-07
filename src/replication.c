@@ -4904,8 +4904,8 @@ void waitCommand(client *c) {
     /* Argument parsing. */
     if (getLongFromObjectOrReply(c,c->argv[1],&numreplicas,NULL) != C_OK)
         return;
-    if (getTimeoutFromObjectOrReply(c,c->argv[2],&timeout,UNIT_MILLISECONDS,
-        (mstime_t)(getMonotonicUs() / 1000)) != C_OK) return;
+    if (getTimeoutFromObjectOrReply(c,c->argv[2],&timeout,UNIT_MILLISECONDS)
+        != C_OK) return;
 
     /* First try without blocking at all. */
     ackreplicas = replicationCountAcksByOffset(c->woff);
@@ -4934,8 +4934,7 @@ void waitaofCommand(client *c) {
         return;
     if (getPositiveLongFromObjectOrReply(c,c->argv[2],&numreplicas,NULL) != C_OK)
         return;
-    if (getTimeoutFromObjectOrReply(c,c->argv[3],&timeout,UNIT_MILLISECONDS,
-        (mstime_t)(getMonotonicUs() / 1000)) != C_OK)
+    if (getTimeoutFromObjectOrReply(c,c->argv[3],&timeout,UNIT_MILLISECONDS) != C_OK)
         return;
 
     if (server.masterhost) {
