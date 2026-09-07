@@ -314,9 +314,25 @@ foreach call_type {nested normal} {
     }
 
     test {block time is equal to timer period} {
-        # These time is equal, they will be unlocked in the same event loop,
-        # when the client is unlock, we will get the OK reply from timer.
-        assert_match "OK" [r unblock_by_timer 100 100]
+        set rd [redis_deferring_client]
+        if {[catch {
+            $rd unblock_by_timer 100 100
+            set fd [$rd channel]
+            fconfigure $fd -blocking 0
+            set reply {}
+
+            # wait_for_condition triples the retries in compression mode.
+            set maxtries [expr {$::compression ? 200 : 600}]
+            wait_for_condition $maxtries 100 {
+                [string first "+OK\r\n" [append reply [read $fd]]] >= 0
+            } else {
+                fail "Did not receive OK reply within 60 seconds"
+            }
+        } err opts]} {
+            $rd close
+            return -options $opts $err
+        }
+        $rd close
     }
     
     test "Unload the module - blockedclient" {
