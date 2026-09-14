@@ -911,6 +911,30 @@ start_server {tags {"cli external:skip"}} {
         set result [exec {*}$cmd]
         assert_match {*Biggest string found "foo" has 0 bytes*} $result
     }
+
+    test "bigkeys should not count zero as the biggest key bytes when query failed" {
+        r flushall
+
+        # uu2 no STRLEN permission, should not show "Biggest string found"
+        r set foo abcdef
+        r ACL SETUSER uu2 reset on {>ps1} allkeys +scan +type +dbsize +select +readonly
+        set result [exec {*}[rediscli [srv host] [srv port] [list -n $::dbnum --user uu2 -a ps1 --no-auth-warning --bigkeys]] 2>@1]
+        assert_match {*Warning:  STRLEN on 'foo' failed*} $result
+        assert_no_match {*Biggest string found*} $result
+        assert_match {*Sampled 0 keys in the keyspace!*} $result
+        assert_match {*0 strings with 0 bytes (00.00% of keys, avg size 0.00)*} $result
+
+        # Allow TYPE for all keys, but restrict STRLEN to an allowed prefix.
+        r set allowed:foo abc
+        r set allowed:bar xy
+        r ACL SETUSER uu2 {(~allowed:* +strlen)}
+        set result [exec {*}[rediscli [srv host] [srv port] [list -n $::dbnum --user uu2 -a ps1 --no-auth-warning --bigkeys]] 2>@1]
+        assert_match {*Warning:  STRLEN on 'foo' failed*} $result
+        assert_no_match {*"foo"*} $result
+        assert_match {*Biggest string found "allowed:foo" has 3 bytes*} $result
+        assert_match {*Sampled 2 keys in the keyspace!*} $result
+        assert_match {*2 strings with 5 bytes (100.00% of keys, avg size 2.50)*} $result
+    }
 }
 
 start_server {tags {"cli external:skip"}} {
