@@ -9897,6 +9897,8 @@ static void getKeySizes(redisReply *keys, typeinfo **types,
                 !memkeys? types[i]->sizecmd: "MEMORY USAGE",
                 keys->element[i]->str);
             sizes[i] = 0;
+            /* Exclude failed measurements, but keep successful zero sizes. */
+            types[i] = NULL;
         } else {
             sizes[i] = reply->integer;
         }
