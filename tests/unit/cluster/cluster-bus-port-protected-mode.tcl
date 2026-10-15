@@ -67,6 +67,19 @@ tags {external:skip cluster} {
         wait_for_condition 100 100 {
             [count_message_lines $logf "Ready to accept"] > 0
         } else {
+            set fd {}
+            if {[catch {
+                set fd [open $logf r]
+                set server_log [read $fd]
+            } read_error]} {
+                if {$fd ne {}} {
+                    catch {close $fd}
+                }
+                set server_log "Unable to read Redis log: $read_error"
+            } else {
+                close $fd
+            }
+            puts "Server did not start; log: $logf\nRedis log:\n$server_log"
             fail "Server did not start; log: $logf"
         }
         # Connect over the plain port: this server knows nothing about the
