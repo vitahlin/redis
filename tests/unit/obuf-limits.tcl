@@ -303,6 +303,13 @@ start_server {tags {"obuf-limits external:skip logreqres:skip"}} {
             regexp {omem-shared=([0-9]+)} $c - omem_shared
             regexp {omem-unshared=([0-9]+)} $c - omem_unshared
             if {$omem_unshared >= $val_size} {
+                puts "unshared snapshot before cron wait: shared=$omem_shared unshared=$omem_unshared"
+                after 1200
+                set clients_after [split [string trim [r client list]] "\r\n"]
+                set c_after [lsearch -inline $clients_after *name=test_client*]
+                regexp {omem-shared=([0-9]+)} $c_after - omem_shared_after
+                regexp {omem-unshared=([0-9]+)} $c_after - omem_unshared_after
+                puts "unshared snapshot after cron wait: shared=$omem_shared_after unshared=$omem_unshared_after"
                 assert_morethan_equal $omem_shared $omem_unshared
                 break
             }
