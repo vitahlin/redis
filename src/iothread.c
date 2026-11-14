@@ -323,8 +323,7 @@ int isClientMustHandledByMainThread(client *c) {
         server.repl_state == REPL_STATE_CONNECTED &&
         server.repl_rdb_ch_state == REPL_RDB_CH_STATE_NONE &&
         server.failover_state == NO_FAILOVER &&
-        !isInsideYieldingLongCommand() &&
-        !(c->flags & CLIENT_PENDING_COMMAND))
+        !(isInsideYieldingLongCommand() || (c->flags & CLIENT_PENDING_COMMAND)))
     {
         return 0;
     }
