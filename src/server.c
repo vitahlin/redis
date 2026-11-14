@@ -2372,6 +2372,7 @@ void createSharedObjects(void) {
     shared.bulk = createStringObject("BULK",4);
     shared.zpopmin = createStringObject("ZPOPMIN",7);
     shared.zpopmax = createStringObject("ZPOPMAX",7);
+    shared.zmove = createStringObject("ZMOVE",5);
     shared.multi = createStringObject("MULTI",5);
     shared.exec = createStringObject("EXEC",4);
     shared.hset = createStringObject("HSET",4);
@@ -5927,7 +5928,7 @@ void addReplyCommandKeySpecs(client *c, struct redisCommand *cmd) {
                 addReplyLongLong(c, cmd->key_specs[i].fk.keynum.keystep);
                 break;
             default:
-                serverPanic("Invalid find_keys key spec type %d", cmd->key_specs[i].begin_search_type);
+                serverPanic("Invalid find_keys key spec type %d", cmd->key_specs[i].find_keys_type);
         }
     }
 }

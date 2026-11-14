@@ -641,6 +641,16 @@ start_server {tags {"scripting"}} {
         } 0
     } {d3ffffff0000000000}
 
+    test {EVAL - cmsgpack can unpack negative int32 and int64?} {
+        run_script {local i32 = cmsgpack.unpack(string.char(0xd2, 0x80, 0, 0, 0))
+                local i64 = cmsgpack.unpack(string.char(0xd3, 0x80, 0, 0, 0, 0, 0, 0, 0))
+                if i32 == -2147483648 and i64 == -9223372036854775808 then
+                    return 1
+                end
+                return 0
+        } 0
+    } {1}
+
     test {EVAL - cmsgpack pack/unpack smoke test} {
         run_script {
                 local str_lt_32 = string.rep("x", 30)
@@ -1580,6 +1590,11 @@ start_server {tags {"scripting"}} {
         # enable AOF to also expose an assertion if the bug would happen
         r flushall
         r config set appendonly yes
+        # Wait for the initial AOF rewrite to complete (it may be slow, e.g. due
+        # to a slow fsync), otherwise aof_state may still be AOF_WAIT_REWRITE
+        # when the "SHUTDOWN NOSAVE" test below runs, and the shutdown will be
+        # refused with "Writing initial AOF, can't exit".
+        waitForBgrewriteaof r
 
         # create clients, and set one to block waiting for key 'x'
         set rd [redis_deferring_client]
